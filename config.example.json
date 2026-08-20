@@ -1,0 +1,14 @@
+{
+  "TunnelId": "tunnel_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "RuntimeApiKey": "sk-REPLACE_WITH_RUNTIME_API_KEY",
+  "McpPort": 8000,
+  "ProfileName": "windows-mcp",
+  "WindowsMcpSpec": "windows-mcp",
+  "PythonVersion": "3.13",
+  "ReuseExistingMcp": false,
+  "AutoOpenChatGptConnectors": true,
+  "AutoDownloadTunnelClient": true,
+  "TunnelClientVersion": "latest",
+  "AutoDetectSystemProxy": true,
+  "ControlPlaneHttpProxy": ""
+}

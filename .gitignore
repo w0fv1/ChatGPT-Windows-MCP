@@ -1,0 +1,37 @@
+# Build output and local runtime
+bin/
+obj/
+dist/
+tools/
+profiles/
+logs/
+runtime/
+patch-backup-*/
+
+# Secrets and local configuration
+config.json
+**/config.json
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.key
+*.pem
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+Thumbs.db
+.DS_Store
+
+# Test / temporary
+TestResults/
+coverage/
+*.tmp
+*.log

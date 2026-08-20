@@ -1,0 +1,42 @@
+name: build-windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore .\src\ChatGPTWindowsMcp\ChatGPTWindowsMcp.csproj
+
+      - name: Build with warnings as errors
+        run: dotnet build .\src\ChatGPTWindowsMcp\ChatGPTWindowsMcp.csproj -c Release --no-restore -warnaserror
+
+      - name: Publish portable single-file
+        shell: pwsh
+        run: .\scripts\publish.ps1
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatGPT-Windows-MCP-win-x64
+          path: .\dist\
+          if-no-files-found: error

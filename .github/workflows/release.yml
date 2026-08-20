@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build
+        run: dotnet build .\src\ChatGPTWindowsMcp\ChatGPTWindowsMcp.csproj -c Release -warnaserror
+
+      - name: Publish
+        shell: pwsh
+        run: .\scripts\publish.ps1
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path .\dist\* -DestinationPath .\ChatGPT-Windows-MCP-win-x64.zip -Force
+          (Get-FileHash .\ChatGPT-Windows-MCP-win-x64.zip -Algorithm SHA256).Hash.ToLower() + '  ChatGPT-Windows-MCP-win-x64.zip' | Set-Content .\SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$env:GITHUB_REF_NAME" .\ChatGPT-Windows-MCP-win-x64.zip .\SHA256SUMS.txt --generate-notes --title "$env:GITHUB_REF_NAME"
