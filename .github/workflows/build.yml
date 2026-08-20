@@ -35,7 +35,7 @@ jobs:
         run: .\scripts\publish.ps1
 
       - name: Upload portable artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ChatGPT-Windows-MCP-win-x64
           path: .\dist\
