@@ -43,7 +43,7 @@ internal sealed class RuntimeManager : IDisposable
     {
         var uv = _bootstrapper.FindUv();
         if (uv is null)
-            await _bootstrapper.InstallUvWithWingetAsync(cancellationToken);
+            await _bootstrapper.InstallUvWithWingetAsync(config, cancellationToken);
         else
             _log.Write($"uv 已存在：{uv}");
 
@@ -243,7 +243,8 @@ internal sealed class RuntimeManager : IDisposable
             ? $"使用 uvx 启动 Windows-MCP：{runnerFileName}"
             : $"使用 uv tool run 启动 Windows-MCP：{runnerFileName}");
         _log.Write("正在启动 Windows-MCP…");
-        return StartLongRunningProcess(runnerFileName, args, null, "windows-mcp", cancellationToken);
+        var env = ProxyResolver.BuildNetworkEnvironment(config);
+        return StartLongRunningProcess(runnerFileName, args, env, "windows-mcp", cancellationToken);
     }
 
     private Dictionary<string, string?> BuildTunnelEnvironment(AppConfig config)
@@ -257,7 +258,13 @@ internal sealed class RuntimeManager : IDisposable
         _log.Write(proxy.Description);
 
         if (proxy.HasProxy)
+        {
             env["CONTROL_PLANE_HTTP_PROXY"] = proxy.ProxyUrl;
+            env["HTTP_PROXY"] = proxy.ProxyUrl;
+            env["HTTPS_PROXY"] = proxy.ProxyUrl;
+            env["http_proxy"] = proxy.ProxyUrl;
+            env["https_proxy"] = proxy.ProxyUrl;
+        }
         else
             env["CONTROL_PLANE_HTTP_PROXY"] = null;
 

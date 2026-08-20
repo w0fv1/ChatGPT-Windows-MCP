@@ -8,16 +8,10 @@ namespace ChatGPTWindowsMcp;
 internal sealed class Bootstrapper
 {
     private readonly LogSink _log;
-    private readonly HttpClient _http;
 
     public Bootstrapper(LogSink log)
     {
         _log = log;
-        _http = new HttpClient
-        {
-            Timeout = TimeSpan.FromMinutes(5)
-        };
-        _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ChatGPT-Windows-MCP", "0.1"));
     }
 
     public string? FindUv() => CommandRunner.FindOnPath("uv.exe") ?? CommandRunner.FindOnPath("uv");
@@ -37,24 +31,34 @@ internal sealed class Bootstrapper
         return null;
     }
 
-    public async Task InstallUvWithWingetAsync(CancellationToken cancellationToken = default)
+    public async Task InstallUvWithWingetAsync(AppConfig config, CancellationToken cancellationToken = default)
     {
         var winget = CommandRunner.FindOnPath("winget.exe") ?? CommandRunner.FindOnPath("winget");
         if (winget is null)
             throw new InvalidOperationException("未找到 WinGet。请先安装 App Installer，或手动安装 uv。");
 
         _log.Write("正在通过 WinGet 安装 uv…");
+        var proxy = ProxyResolver.ResolveControlPlaneProxy(config);
+        var environment = ProxyResolver.BuildNetworkEnvironment(config);
+        var arguments = new List<string>
+        {
+            "install",
+            "--id", "astral-sh.uv",
+            "-e",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--silent"
+        };
+        if (proxy.HasProxy)
+        {
+            arguments.Add("--proxy");
+            arguments.Add(proxy.ProxyUrl!);
+        }
+
         var result = await CommandRunner.RunAsync(
             winget,
-            new[]
-            {
-                "install",
-                "--id", "astral-sh.uv",
-                "-e",
-                "--accept-package-agreements",
-                "--accept-source-agreements",
-                "--silent"
-            },
+            arguments,
+            environment: environment,
             log: _log,
             source: "winget",
             cancellationToken: cancellationToken);
@@ -81,7 +85,8 @@ internal sealed class Bootstrapper
         if (RuntimeInformation.OSArchitecture != Architecture.X64)
             throw new PlatformNotSupportedException($"当前仅自动下载 Windows x64 tunnel-client。检测到架构：{RuntimeInformation.OSArchitecture}");
 
-        var (tag, assetUrl) = await ResolveTunnelClientReleaseAsync(config.TunnelClientVersion, cancellationToken);
+        using var http = CreateHttpClient(config);
+        var (tag, assetUrl) = await ResolveTunnelClientReleaseAsync(http, config.TunnelClientVersion, cancellationToken);
 
         _log.Write($"正在下载 OpenAI tunnel-client {tag}…");
         var tempZip = Path.Combine(Path.GetTempPath(), $"tunnel-client-{Guid.NewGuid():N}.zip");
@@ -89,7 +94,7 @@ internal sealed class Bootstrapper
 
         try
         {
-            await using (var input = await _http.GetStreamAsync(assetUrl, cancellationToken))
+            await using (var input = await http.GetStreamAsync(assetUrl, cancellationToken))
             await using (var output = File.Create(tempZip))
                 await input.CopyToAsync(output, cancellationToken);
 
@@ -151,6 +156,7 @@ internal sealed class Bootstrapper
     }
 
     private async Task<(string Tag, string Url)> ResolveTunnelClientReleaseAsync(
+        HttpClient http,
         string requestedVersion,
         CancellationToken cancellationToken)
     {
@@ -169,7 +175,7 @@ internal sealed class Bootstrapper
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, latestPage);
-            using var response = await _http.SendAsync(
+            using var response = await http.SendAsync(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
                 cancellationToken);
@@ -189,6 +195,16 @@ internal sealed class Bootstrapper
             _log.Write($"改用兼容回退版本 {fallbackTag}。可在 config.json 的 TunnelClientVersion 中指定其他版本。");
             return (fallbackTag, BuildTunnelClientAssetUrl(fallbackTag));
         }
+    }
+
+    private HttpClient CreateHttpClient(AppConfig config)
+    {
+        var proxy = ProxyResolver.ResolveControlPlaneProxy(config);
+        _log.Write(proxy.Description);
+        var http = ProxyResolver.CreateHttpClient(config);
+        http.Timeout = TimeSpan.FromMinutes(5);
+        http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ChatGPT-Windows-MCP", "0.1.1"));
+        return http;
     }
 
     private static string NormalizeTag(string version) =>

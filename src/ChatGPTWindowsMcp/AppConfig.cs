@@ -63,7 +63,7 @@ internal sealed class AppConfig
 
         if (!string.IsNullOrWhiteSpace(ControlPlaneHttpProxy) &&
             !ProxyResolver.TryNormalizeProxyUrl(ControlPlaneHttpProxy, out _))
-            errors.Add("Control Plane 代理地址无效，应类似 http://127.0.0.1:7890。");
+            errors.Add("代理地址无效，必须以 http:// 或 https:// 开头，例如 http://127.0.0.1:7890。");
 
         return errors;
     }

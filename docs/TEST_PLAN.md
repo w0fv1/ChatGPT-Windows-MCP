@@ -22,6 +22,13 @@
 - [ ] `tunnel-client` downloads from `openai/tunnel-client` into `tools\tunnel-client`.
 - [ ] `cloudflared.exe` is copied beside `tunnel-client.exe`.
 
+## Proxy
+
+- [ ] The third wizard step accepts an empty proxy and rejects values without `http://` or `https://`.
+- [ ] A configured proxy is used by the tunnel-client HTTP download and WinGet uv installation.
+- [ ] uv/uvx and tunnel-client doctor/run receive the proxy through their environment.
+- [ ] With the field empty, enabled Windows system proxy detection still accepts native `host:port` values.
+
 ## Windows-MCP
 
 - [ ] With port 8000 free, launcher starts Windows-MCP.

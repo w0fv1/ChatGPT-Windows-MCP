@@ -267,6 +267,8 @@ public partial class MainWindow : Window
 
         TunnelIdTextBox.Text = _config.TunnelId;
         SetApiKeyControls(_config.RuntimeApiKey);
+        WizardProxyTextBox.Text = _config.ControlPlaneHttpProxy;
+        WizardAutoDetectProxyCheckBox.IsChecked = _config.AutoDetectSystemProxy;
         RenderWizardStep();
         MainScrollViewer.Visibility = Visibility.Collapsed;
         WizardRoot.Visibility = Visibility.Visible;
@@ -284,20 +286,28 @@ public partial class MainWindow : Window
     private void RenderWizardStep()
     {
         var tunnelStep = _wizardStepIndex == 0;
+        var apiStep = _wizardStepIndex == 1;
+        var proxyStep = _wizardStepIndex == 2;
         TunnelStepPanel.Visibility = tunnelStep ? Visibility.Visible : Visibility.Collapsed;
-        ApiStepPanel.Visibility = tunnelStep ? Visibility.Collapsed : Visibility.Visible;
-        WizardStepCaption.Text = tunnelStep ? "步骤 1 / 2" : "步骤 2 / 2";
+        ApiStepPanel.Visibility = apiStep ? Visibility.Visible : Visibility.Collapsed;
+        ProxyStepPanel.Visibility = proxyStep ? Visibility.Visible : Visibility.Collapsed;
+        WizardStepCaption.Text = $"步骤 {_wizardStepIndex + 1} / 3";
 
         TunnelStepPill.Foreground = tunnelStep
             ? ResourceBrush("AccentBrush", Brushes.RoyalBlue)
             : ResourceBrush("SuccessBrush", Brushes.ForestGreen);
         TunnelStepPill.Text = tunnelStep ? "1  Tunnel ID" : "✓  Tunnel ID";
-        ApiStepPill.Foreground = tunnelStep
-            ? ResourceBrush("TextSecondaryBrush", Brushes.DimGray)
-            : ResourceBrush("AccentBrush", Brushes.RoyalBlue);
+        ApiStepPill.Foreground = apiStep
+            ? ResourceBrush("AccentBrush", Brushes.RoyalBlue)
+            : proxyStep ? ResourceBrush("SuccessBrush", Brushes.ForestGreen) : ResourceBrush("TextSecondaryBrush", Brushes.DimGray);
+        ApiStepPill.Text = proxyStep ? "✓  API Key" : "2  API Key";
+        ProxyStepPill.Foreground = proxyStep
+            ? ResourceBrush("AccentBrush", Brushes.RoyalBlue)
+            : ResourceBrush("TextSecondaryBrush", Brushes.DimGray);
 
         UpdateTunnelValidation();
         UpdateApiValidation();
+        UpdateWizardProxyValidation();
 
         Dispatcher.BeginInvoke(() =>
         {
@@ -306,14 +316,19 @@ public partial class MainWindow : Window
                 TunnelIdTextBox.Focus();
                 TunnelIdTextBox.CaretIndex = TunnelIdTextBox.Text.Length;
             }
-            else if (ShowApiKeyCheckBox.IsChecked == true)
+            else if (apiStep && ShowApiKeyCheckBox.IsChecked == true)
             {
                 ApiKeyTextBox.Focus();
                 ApiKeyTextBox.CaretIndex = ApiKeyTextBox.Text.Length;
             }
-            else
+            else if (apiStep)
             {
                 ApiKeyPasswordBox.Focus();
+            }
+            else
+            {
+                WizardProxyTextBox.Focus();
+                WizardProxyTextBox.CaretIndex = WizardProxyTextBox.Text.Length;
             }
         });
     }
@@ -378,9 +393,13 @@ public partial class MainWindow : Window
                 SaveConfig();
             }
         }
-        else
+        else if (_wizardStepIndex == 1)
         {
             SaveCurrentApiKeyIfPresent();
+        }
+        else
+        {
+            SaveWizardProxyIfValid();
         }
 
         ShowMainPage();
@@ -483,7 +502,67 @@ public partial class MainWindow : Window
 
         _config.RuntimeApiKey = apiKey;
         SaveConfig();
+        _wizardStepIndex = 2;
+        RenderWizardStep();
+    }
+
+    private void ProxyBackButton_Click(object sender, RoutedEventArgs e)
+    {
+        SaveWizardProxyIfValid();
+        _wizardStepIndex = 1;
+        RenderWizardStep();
+    }
+
+    private void WizardProxyTextBox_TextChanged(object sender, TextChangedEventArgs e) => UpdateWizardProxyValidation();
+
+    private void UpdateWizardProxyValidation()
+    {
+        if (WizardProxyValidationText is null || ProxyFinishButton is null)
+            return;
+
+        var proxy = WizardProxyTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(proxy))
+        {
+            WizardProxyValidationText.Text = "可留空。示例：http://127.0.0.1:7890";
+            WizardProxyValidationText.Foreground = ResourceBrush("TextSecondaryBrush", Brushes.DimGray);
+            ProxyFinishButton.IsEnabled = true;
+        }
+        else if (ProxyResolver.TryNormalizeProxyUrl(proxy, out _))
+        {
+            WizardProxyValidationText.Text = "✓ 代理地址格式正确";
+            WizardProxyValidationText.Foreground = ResourceBrush("SuccessBrush", Brushes.ForestGreen);
+            ProxyFinishButton.IsEnabled = true;
+        }
+        else
+        {
+            WizardProxyValidationText.Text = "代理地址必须以 http:// 或 https:// 开头。";
+            WizardProxyValidationText.Foreground = ResourceBrush("DangerBrush", Brushes.Firebrick);
+            ProxyFinishButton.IsEnabled = false;
+        }
+    }
+
+    private void ProxyFinishButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!SaveWizardProxyIfValid())
+            return;
+
         ShowMainPage();
+    }
+
+    private bool SaveWizardProxyIfValid()
+    {
+        var proxy = WizardProxyTextBox.Text.Trim();
+        var normalized = "";
+        if (!string.IsNullOrWhiteSpace(proxy))
+        {
+            if (!ProxyResolver.TryNormalizeProxyUrl(proxy, out normalized))
+                return false;
+        }
+
+        _config.ControlPlaneHttpProxy = string.IsNullOrWhiteSpace(proxy) ? "" : normalized;
+        _config.AutoDetectSystemProxy = WizardAutoDetectProxyCheckBox.IsChecked == true;
+        SaveConfig();
+        return true;
     }
 
     private void SaveCurrentApiKeyIfPresent()
@@ -510,6 +589,8 @@ public partial class MainWindow : Window
 
     private void LoadAdvancedConfig()
     {
+        AdvancedTunnelIdTextBox.Text = _config.TunnelId;
+        AdvancedApiKeyPasswordBox.Password = _config.RuntimeApiKey;
         PortTextBox.Text = _config.McpPort.ToString();
         ProfileTextBox.Text = _config.ProfileName;
         WindowsMcpTextBox.Text = _config.WindowsMcpSpec;
@@ -523,6 +604,24 @@ public partial class MainWindow : Window
 
     private bool SaveAdvancedConfig(bool showSuccess)
     {
+        var tunnelId = AdvancedTunnelIdTextBox.Text.Trim();
+        if (!IsTunnelIdValid(tunnelId))
+        {
+            MessageBox.Show("Tunnel ID 无效，应以 tunnel_ 开头。", "高级选项", MessageBoxButton.OK, MessageBoxImage.Warning);
+            AdvancedExpander.IsExpanded = true;
+            AdvancedTunnelIdTextBox.Focus();
+            return false;
+        }
+
+        var apiKey = AdvancedApiKeyPasswordBox.Password.Trim();
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            MessageBox.Show("Runtime API Key 不能为空。", "高级选项", MessageBoxButton.OK, MessageBoxImage.Warning);
+            AdvancedExpander.IsExpanded = true;
+            AdvancedApiKeyPasswordBox.Focus();
+            return false;
+        }
+
         if (!int.TryParse(PortTextBox.Text.Trim(), out var port) || port is < 1024 or > 65535)
         {
             MessageBox.Show("MCP 本地端口必须在 1024–65535 之间。", "高级选项", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -534,17 +633,21 @@ public partial class MainWindow : Window
         var proxy = ProxyTextBox.Text.Trim();
         if (!string.IsNullOrWhiteSpace(proxy) && !ProxyResolver.TryNormalizeProxyUrl(proxy, out _))
         {
-            MessageBox.Show("Control Plane 代理地址无效，应类似 http://127.0.0.1:7890。", "高级选项", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show("代理地址必须以 http:// 或 https:// 开头，例如 http://127.0.0.1:7890。", "高级选项", MessageBoxButton.OK, MessageBoxImage.Warning);
             AdvancedExpander.IsExpanded = true;
             ProxyTextBox.Focus();
             return false;
         }
 
+        _config.TunnelId = tunnelId;
+        _config.RuntimeApiKey = apiKey;
         _config.McpPort = port;
         _config.ProfileName = string.IsNullOrWhiteSpace(ProfileTextBox.Text) ? "windows-mcp" : ProfileTextBox.Text.Trim();
         _config.WindowsMcpSpec = string.IsNullOrWhiteSpace(WindowsMcpTextBox.Text) ? "windows-mcp" : WindowsMcpTextBox.Text.Trim();
         _config.PythonVersion = string.IsNullOrWhiteSpace(PythonTextBox.Text) ? "3.13" : PythonTextBox.Text.Trim();
-        _config.ControlPlaneHttpProxy = proxy;
+        _config.ControlPlaneHttpProxy = string.IsNullOrWhiteSpace(proxy)
+            ? ""
+            : ProxyResolver.TryNormalizeProxyUrl(proxy, out var normalizedProxy) ? normalizedProxy : proxy;
         _config.AutoDetectSystemProxy = AutoDetectProxyCheckBox.IsChecked == true;
         _config.ReuseExistingMcp = ReuseMcpCheckBox.IsChecked == true;
         _config.AutoOpenChatGptConnectors = AutoOpenCheckBox.IsChecked == true;
@@ -566,6 +669,8 @@ public partial class MainWindow : Window
 
     private void SetAdvancedEditorsEnabled(bool enabled)
     {
+        AdvancedTunnelIdTextBox.IsEnabled = enabled;
+        AdvancedApiKeyPasswordBox.IsEnabled = enabled;
         PortTextBox.IsEnabled = enabled;
         ProfileTextBox.IsEnabled = enabled;
         WindowsMcpTextBox.IsEnabled = enabled;

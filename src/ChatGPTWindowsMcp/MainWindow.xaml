@@ -76,7 +76,27 @@
 
                         <Border Margin="0,14,0,0" Style="{StaticResource CardStyle}">
                             <StackPanel>
-                                <TextBlock Text="运行设置" Style="{StaticResource SectionTitle}"/>
+                                <TextBlock Text="连接凭据" Style="{StaticResource SectionTitle}"/>
+                                <TextBlock Margin="0,6,0,24"
+                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                           TextWrapping="Wrap"
+                                           Text="可在这里直接修改 OpenAI Tunnel ID 和 Runtime API Key。保存后将在下次连接时生效。"/>
+
+                                <StackPanel Margin="0,0,0,20">
+                                    <TextBlock Text="Tunnel ID" Style="{StaticResource FieldLabel}"/>
+                                    <TextBox x:Name="AdvancedTunnelIdTextBox"/>
+                                    <TextBlock Text="应以 tunnel_ 开头。" Style="{StaticResource HelpText}"/>
+                                </StackPanel>
+
+                                <StackPanel Margin="0,0,0,26">
+                                    <TextBlock Text="Runtime API Key" Style="{StaticResource FieldLabel}"/>
+                                    <PasswordBox x:Name="AdvancedApiKeyPasswordBox"/>
+                                    <TextBlock Text="密钥仅保存在本机 config.json 中。" Style="{StaticResource HelpText}"/>
+                                </StackPanel>
+
+                                <Border BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,1,0,0" Padding="0,22,0,0" Margin="0,0,0,22">
+                                    <TextBlock Text="运行设置" Style="{StaticResource SectionTitle}"/>
+                                </Border>
                                 <TextBlock Margin="0,6,0,24"
                                            Foreground="{StaticResource TextSecondaryBrush}"
                                            TextWrapping="Wrap"
@@ -107,15 +127,15 @@
                                 </StackPanel>
 
                                 <StackPanel Margin="0,0,0,26">
-                                    <TextBlock Text="Control Plane 代理" Style="{StaticResource FieldLabel}"/>
+                                    <TextBlock Text="网络代理" Style="{StaticResource FieldLabel}"/>
                                     <TextBox x:Name="ProxyTextBox"/>
-                                    <TextBlock Text="留空时自动检测环境变量和 Windows 系统代理。示例：http://127.0.0.1:7890" Style="{StaticResource HelpText}"/>
+                                    <TextBlock Text="用于下载 tunnel-client、安装/运行 uv 和连接 Tunnel。必须以 http:// 或 https:// 开头；留空时可自动检测。" Style="{StaticResource HelpText}"/>
                                 </StackPanel>
 
                                 <Border BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,1,0,0" Padding="0,22,0,0">
                                     <StackPanel>
                                         <TextBlock Text="行为" Style="{StaticResource SectionTitle}" FontSize="18"/>
-                                        <CheckBox x:Name="AutoDetectProxyCheckBox" Margin="0,16,0,10" Content="自动读取 Windows 系统代理供 OpenAI Control Plane 使用"/>
+                                        <CheckBox x:Name="AutoDetectProxyCheckBox" Margin="0,16,0,10" Content="自动读取 Windows 系统代理供下载和 OpenAI Tunnel 使用"/>
                                         <CheckBox x:Name="ReuseMcpCheckBox" Margin="0,0,0,10" Content="本地端口已有 MCP 时复用"/>
                                         <CheckBox x:Name="AutoOpenCheckBox" Margin="0,0,0,10" Content="连接成功后自动打开 ChatGPT 连接器设置"/>
                                         <CheckBox x:Name="AutoDownloadTunnelCheckBox" Margin="0,0,0,0" Content="缺少 tunnel-client 时自动下载官方最新版"/>
@@ -154,7 +174,7 @@
             </Grid>
         </ScrollViewer>
 
-        <!-- 两步配置向导 -->
+        <!-- 三步配置向导 -->
         <Grid x:Name="WizardRoot" Visibility="Collapsed" Background="{StaticResource PageBackgroundBrush}">
             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <Grid Margin="24,22,24,24">
@@ -175,6 +195,10 @@
                             <TextBlock Margin="2,5,2,0" Foreground="#A0A5AD" Text="────────"/>
                             <Border Margin="10,0,0,0" Padding="12,6" CornerRadius="0" Background="#ECEEF1">
                                 <TextBlock x:Name="ApiStepPill" Text="2  API Key" Foreground="{StaticResource TextSecondaryBrush}" FontWeight="SemiBold"/>
+                            </Border>
+                            <TextBlock Margin="2,5,2,0" Foreground="#A0A5AD" Text="────────"/>
+                            <Border Margin="10,0,0,0" Padding="12,6" CornerRadius="0" Background="#ECEEF1">
+                                <TextBlock x:Name="ProxyStepPill" Text="3  代理（可选）" Foreground="{StaticResource TextSecondaryBrush}" FontWeight="SemiBold"/>
                             </Border>
                         </StackPanel>
 
@@ -231,7 +255,32 @@
                                             </Grid.ColumnDefinitions>
                                             <Button Grid.Column="0" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0" Content="取消" Click="WizardCancel_Click"/>
                                             <Button Grid.Column="1" Style="{StaticResource SecondaryButton}" Content="上一步" Click="WizardBack_Click"/>
-                                            <Button x:Name="ApiFinishButton" Grid.Column="3" Style="{StaticResource PrimaryButton}" Content="完成" Click="ApiFinishButton_Click"/>
+                                            <Button x:Name="ApiFinishButton" Grid.Column="3" Style="{StaticResource PrimaryButton}" Content="下一步" Click="ApiFinishButton_Click"/>
+                                        </Grid>
+                                    </StackPanel>
+                                </Grid>
+
+                                <Grid x:Name="ProxyStepPanel" Visibility="Collapsed">
+                                    <StackPanel>
+                                        <TextBlock Text="配置网络代理（可选）" Style="{StaticResource SectionTitle}" FontSize="28"/>
+                                        <TextBlock Margin="0,10,0,22" FontSize="15" LineHeight="24" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"
+                                                   Text="如果 GitHub、uv 或 OpenAI Tunnel 无法直连，可填写 HTTP(S) 代理。该代理会用于下载 tunnel-client、安装/运行 uv 以及连接 Tunnel。留空时自动检测环境变量和 Windows 系统代理。"/>
+
+                                        <TextBlock Margin="0,8,0,8" Text="代理地址" Style="{StaticResource FieldLabel}"/>
+                                        <TextBox x:Name="WizardProxyTextBox" TextChanged="WizardProxyTextBox_TextChanged"/>
+                                        <TextBlock x:Name="WizardProxyValidationText" Style="{StaticResource HelpText}"/>
+                                        <CheckBox x:Name="WizardAutoDetectProxyCheckBox" Margin="0,18,0,0" Content="留空时自动读取 Windows 系统代理"/>
+
+                                        <Grid Margin="0,28,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Button Grid.Column="0" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0" Content="取消" Click="WizardCancel_Click"/>
+                                            <Button Grid.Column="1" Style="{StaticResource SecondaryButton}" Content="上一步" Click="ProxyBackButton_Click"/>
+                                            <Button x:Name="ProxyFinishButton" Grid.Column="3" Style="{StaticResource PrimaryButton}" Content="完成" Click="ProxyFinishButton_Click"/>
                                         </Grid>
                                     </StackPanel>
                                 </Grid>

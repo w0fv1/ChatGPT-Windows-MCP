@@ -1,4 +1,5 @@
 using Microsoft.Win32;
+using System.Net;
 
 namespace ChatGPTWindowsMcp;
 
@@ -15,14 +16,14 @@ internal static class ProxyResolver
     {
         if (!string.IsNullOrWhiteSpace(config.ControlPlaneHttpProxy))
         {
-            var normalized = NormalizeProxyUrl(config.ControlPlaneHttpProxy);
-            return new ProxyResolution(normalized, "config", $"使用配置中的 Control Plane 代理：{FormatForLog(normalized)}");
+            var normalized = NormalizeProxyUrl(config.ControlPlaneHttpProxy, requireScheme: true);
+            return new ProxyResolution(normalized, "config", $"使用配置中的网络代理：{FormatForLog(normalized)}");
         }
 
         var environmentProxy = FirstEnvironmentProxy();
         if (environmentProxy is not null)
         {
-            var normalized = NormalizeProxyUrl(environmentProxy.Value.Value);
+            var normalized = NormalizeProxyUrl(environmentProxy.Value.Value, requireScheme: false);
             return new ProxyResolution(normalized, environmentProxy.Value.Name,
                 $"检测到环境变量 {environmentProxy.Value.Name}：{FormatForLog(normalized)}");
         }
@@ -33,7 +34,7 @@ internal static class ProxyResolver
         var systemProxy = TryReadWindowsSystemProxy();
         if (!string.IsNullOrWhiteSpace(systemProxy))
         {
-            var normalized = NormalizeProxyUrl(systemProxy);
+            var normalized = NormalizeProxyUrl(systemProxy, requireScheme: false);
             return new ProxyResolution(normalized, "windows-system-proxy",
                 $"检测到 Windows 系统代理：{FormatForLog(normalized)}");
         }
@@ -45,7 +46,7 @@ internal static class ProxyResolver
     {
         try
         {
-            normalized = NormalizeProxyUrl(value);
+            normalized = NormalizeProxyUrl(value, requireScheme: true);
             return true;
         }
         catch
@@ -123,11 +124,46 @@ internal static class ProxyResolver
         return https ?? http;
     }
 
-    private static string NormalizeProxyUrl(string value)
+    public static Dictionary<string, string?> BuildNetworkEnvironment(AppConfig config)
+    {
+        var proxy = ResolveControlPlaneProxy(config);
+        if (!proxy.HasProxy)
+            return new Dictionary<string, string?>();
+
+        return new Dictionary<string, string?>
+        {
+            ["HTTP_PROXY"] = proxy.ProxyUrl,
+            ["HTTPS_PROXY"] = proxy.ProxyUrl,
+            ["http_proxy"] = proxy.ProxyUrl,
+            ["https_proxy"] = proxy.ProxyUrl
+        };
+    }
+
+    public static HttpClient CreateHttpClient(AppConfig config)
+    {
+        var proxy = ResolveControlPlaneProxy(config);
+        var handler = new HttpClientHandler();
+        if (proxy.HasProxy)
+        {
+            handler.Proxy = new WebProxy(proxy.ProxyUrl!);
+            handler.UseProxy = true;
+        }
+        else
+        {
+            handler.UseProxy = false;
+        }
+
+        return new HttpClient(handler, disposeHandler: true);
+    }
+
+    private static string NormalizeProxyUrl(string value, bool requireScheme)
     {
         var candidate = value.Trim();
         if (candidate.Length == 0)
             throw new FormatException("代理地址为空。");
+
+        if (!candidate.Contains("://", StringComparison.Ordinal) && requireScheme)
+            throw new FormatException("代理地址必须以 http:// 或 https:// 开头。");
 
         if (!candidate.Contains("://", StringComparison.Ordinal))
             candidate = "http://" + candidate;
@@ -137,7 +173,7 @@ internal static class ProxyResolver
 
         if (!uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) &&
             !uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
-            throw new FormatException("Control Plane 代理仅支持 http:// 或 https:// URL。");
+            throw new FormatException("网络代理仅支持 http:// 或 https:// URL。");
 
         return uri.AbsoluteUri.TrimEnd('/');
     }

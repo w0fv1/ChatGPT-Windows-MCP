@@ -60,10 +60,11 @@ ChatGPT connector can operate the local Windows machine
 3. Click **创建链接**.
 4. Step 1 opens the OpenAI Tunnel page. Create a Tunnel and paste the `tunnel_...` value.
 5. Step 2 opens the Runtime API Key page. Create a Runtime API Key and paste it.
-6. Click **完成**, then **启动**.
-7. Keep the launcher running while using the corresponding ChatGPT connector.
+6. Step 3 optionally accepts an HTTP(S) proxy. Proxy URLs must start with `http://` or `https://`.
+7. Click **完成**, then **启动**.
+8. Keep the launcher running while using the corresponding ChatGPT connector.
 
-The primary UI only asks for those two values. MCP port, profile/package/Python version, proxy settings, logs, and diagnostics are under **高级选项**.
+The proxy is used for tunnel-client downloads, WinGet/uv network access, Windows-MCP package resolution, and the OpenAI Tunnel connection. When left blank, environment variables and the Windows system proxy can be detected automatically. Other runtime settings, logs, and diagnostics are under **高级选项**.
 
 ## Architecture
 

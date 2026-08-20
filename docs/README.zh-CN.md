@@ -17,6 +17,8 @@
       ↓
 填写 API Key
       ↓
+可选：配置 HTTP(S) 代理
+      ↓
 启动
 ```
 
@@ -25,11 +27,11 @@
 ## 功能
 
 - WPF + XAML Windows 桌面界面。
-- Tunnel ID / Runtime API Key 两步向导。
+- Tunnel ID / Runtime API Key / 可选代理三步向导。
 - 一键启动和停止。
 - 自动管理 Windows-MCP 和官方 `tunnel-client`。
 - 以实际 `tunnel metadata fetched` 为 Tunnel 就绪条件，避免进程存活造成误判。
-- 支持 Windows 系统代理自动检测和 Control Plane 手动代理。
+- 支持 Windows 系统代理自动检测和手动 HTTP(S) 代理；代理会用于 tunnel-client 下载、WinGet/uv、Windows-MCP 包解析和 Tunnel 连接。
 - 高级选项中提供日志、连接诊断和运行参数。
 - Windows x64 自包含单文件发布。
 - GitHub Actions 构建、CodeQL、安全策略、Dependabot 和自动 Release。
@@ -41,8 +43,9 @@
 3. 点击 **创建链接**。
 4. 第一步按照提示创建 OpenAI Tunnel，并填入 `tunnel_...`。
 5. 第二步创建 Runtime API Key 并填入。
-6. 点击 **完成**，回到主页点击 **启动**。
-7. Tunnel 显示已连接后，在 ChatGPT 中使用对应连接器。
+6. 第三步可选填写代理地址；填写时必须以 `http://` 或 `https://` 开头。
+7. 点击 **完成**，回到主页点击 **启动**。
+8. Tunnel 显示已连接后，在 ChatGPT 中使用对应连接器。
 
 ## 安全提示
 
