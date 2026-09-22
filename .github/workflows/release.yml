@@ -4,39 +4,117 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
+    # One-time merge-triggered release requested for this fix. Other versions
+    # continue to use explicit tags. Existing releases are never overwritten.
+    paths:
+      - 'docs/releases/v0.1.2.md'
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   release:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     timeout-minutes: 25
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
-      - name: Checkout
+      - name: Checkout exact source
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release identity
+        id: identity
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [xml]$props = Get-Content .\Directory.Build.props
+          $version = [string]$props.Project.PropertyGroup.Version
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw 'Invalid project version' }
+          $tag = "v$version"
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            if ($env:GITHUB_REF_NAME -ne $tag) { throw 'Tag and project version differ' }
+          } elseif ($env:GITHUB_REF -ne 'refs/heads/main' -or $version -ne '0.1.2') {
+            throw 'Merge-triggered publishing is restricted to v0.1.2 on main; use explicit tags for other releases'
+          }
+          $commit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve source commit' }
+          $existing = & git rev-parse --verify --quiet "refs/tags/${tag}^{commit}"
+          if ($LASTEXITCODE -eq 0 -and $existing.Trim() -ne $commit) { throw 'Refusing to move an existing tag' }
+          $notes = "docs/releases/$tag.md"
+          if (-not (Test-Path $notes)) { throw "Missing release notes: $notes" }
+          "tag=$tag" | Add-Content $env:GITHUB_OUTPUT
+          "commit=$commit" | Add-Content $env:GITHUB_OUTPUT
+          "notes=$notes" | Add-Content $env:GITHUB_OUTPUT
+          # rev-parse may return 1 for a not-yet-created tag; this is expected.
+          exit 0
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
-      - name: Build
-        run: dotnet build .\src\ChatGPTWindowsMcp\ChatGPTWindowsMcp.csproj -c Release -warnaserror
+      - name: Build and run regression tests
+        run: .\scripts\verify-runtime-fix.ps1
 
-      - name: Publish
-        shell: pwsh
-        run: .\scripts\publish.ps1
-
-      - name: Package
-        shell: pwsh
+      - name: Publish portable Windows executable
         run: |
-          Compress-Archive -Path .\dist\* -DestinationPath .\ChatGPT-Windows-MCP-win-x64.zip -Force
-          (Get-FileHash .\ChatGPT-Windows-MCP-win-x64.zip -Algorithm SHA256).Hash.ToLower() + '  ChatGPT-Windows-MCP-win-x64.zip' | Set-Content .\SHA256SUMS.txt
+          .\scripts\publish.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Publish failed' }
 
-      - name: Create GitHub Release
-        shell: pwsh
+      - name: Package and checksum
+        env:
+          RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path .\dist\ChatGPT-Windows-MCP.exe)) { throw 'Published executable is missing' }
+          Copy-Item .\LICENSE .\dist\LICENSE -Force
+          Copy-Item .\docs\RUNTIME_FIX.md .\dist\RUNTIME_FIX.md -Force
+          Set-Content .\dist\SOURCE_COMMIT.txt $env:RELEASE_COMMIT -Encoding utf8NoBOM
+          Compress-Archive -Path .\dist\* -DestinationPath .\ChatGPT-Windows-MCP-win-x64.zip -Force
+          $hash = (Get-FileHash .\ChatGPT-Windows-MCP-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  ChatGPT-Windows-MCP-win-x64.zip" | Set-Content .\SHA256SUMS.txt -Encoding utf8NoBOM
+
+      - name: Create draft and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$env:GITHUB_REF_NAME" .\ChatGPT-Windows-MCP-win-x64.zip .\SHA256SUMS.txt --generate-notes --title "$env:GITHUB_REF_NAME"
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
+          RELEASE_NOTES: ${{ steps.identity.outputs.notes }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # create fails if a release already exists: never clobber published assets.
+          & gh release create $env:RELEASE_TAG .\ChatGPT-Windows-MCP-win-x64.zip .\SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_COMMIT --draft --title $env:RELEASE_TAG --notes-file $env:RELEASE_NOTES
+          if ($LASTEXITCODE -ne 0) { throw 'Draft release creation or asset upload failed; no publication attempted' }
+
+      - name: Verify uploaded bytes and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $verify = Join-Path $env:RUNNER_TEMP ('release-verify-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $verify | Out-Null
+          & gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir $verify --pattern 'ChatGPT-Windows-MCP-win-x64.zip' --pattern 'SHA256SUMS.txt'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot download draft assets for verification; release remains draft' }
+          foreach ($name in @('ChatGPT-Windows-MCP-win-x64.zip', 'SHA256SUMS.txt')) {
+            $local = (Get-FileHash (Join-Path $PWD $name) -Algorithm SHA256).Hash
+            $remote = (Get-FileHash (Join-Path $verify $name) -Algorithm SHA256).Hash
+            if ($local -ne $remote) { throw "Asset integrity mismatch: $name; release remains draft" }
+          }
+          & gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
+          "Published $env:RELEASE_TAG after build, regression tests and downloaded-asset verification." | Add-Content $env:GITHUB_STEP_SUMMARY

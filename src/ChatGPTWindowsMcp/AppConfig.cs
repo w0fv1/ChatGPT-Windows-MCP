@@ -65,6 +65,9 @@ internal sealed class AppConfig
             !ProxyResolver.TryNormalizeProxyUrl(ControlPlaneHttpProxy, out _))
             errors.Add("代理地址无效，必须以 http:// 或 https:// 开头，例如 http://127.0.0.1:7890。");
 
+        try { _ = TunnelVersionPolicy.Normalize(TunnelClientVersion); }
+        catch (ArgumentException ex) { errors.Add(ex.Message); }
+
         return errors;
     }
 

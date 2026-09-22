@@ -1,8 +1,8 @@
 <Project>
   <PropertyGroup>
-    <Version>0.1.1</Version>
-    <FileVersion>0.1.1.0</FileVersion>
-    <AssemblyVersion>0.1.1.0</AssemblyVersion>
+    <Version>0.1.2</Version>
+    <FileVersion>0.1.2.0</FileVersion>
+    <AssemblyVersion>0.1.2.0</AssemblyVersion>
     <Authors>ChatGPT-Windows-MCP contributors</Authors>
     <Description>Portable Windows launcher for Windows-MCP and OpenAI Secure MCP Tunnel.</Description>
   </PropertyGroup>

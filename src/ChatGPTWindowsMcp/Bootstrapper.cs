@@ -8,6 +8,7 @@ namespace ChatGPTWindowsMcp;
 internal sealed class Bootstrapper
 {
     private readonly LogSink _log;
+    private readonly SemaphoreSlim _installGate = new(1, 1);
 
     public Bootstrapper(LogSink log)
     {
@@ -71,57 +72,121 @@ internal sealed class Bootstrapper
 
     public async Task<string> EnsureTunnelClientAsync(AppConfig config, CancellationToken cancellationToken = default)
     {
-        AppPaths.EnsureDirectories();
+        await _installGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await EnsureTunnelClientCoreAsync(config, cancellationToken).ConfigureAwait(false);
+        }
+        finally { _installGate.Release(); }
+    }
 
-        if (File.Exists(AppPaths.TunnelClientExe))
+    private async Task<string> EnsureTunnelClientCoreAsync(AppConfig config, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        AppPaths.EnsureDirectories();
+        var requested = TunnelVersionPolicy.Normalize(config.TunnelClientVersion);
+        var root = AppPaths.TunnelClientDirectory;
+        var pointer = Path.Combine(root, "current-version.txt");
+        string? tag = requested == "latest" ? null : requested;
+
+        // latest means use the selected cache; it never silently replaces a
+        // working installation. Fixed versions must never reuse the legacy EXE.
+        if (requested == "latest" && File.Exists(pointer))
+        {
+            if (new FileInfo(pointer).Length > 128)
+                throw new InvalidDataException("当前版本记录过大；请检查 current-version.txt。");
+            tag = TunnelVersionPolicy.Normalize(
+                await File.ReadAllTextAsync(pointer, cancellationToken).ConfigureAwait(false));
+            if (tag == "latest") throw new InvalidDataException("当前版本记录必须包含明确版本号。");
+        }
+        else if (requested == "latest" && File.Exists(AppPaths.TunnelClientExe))
+        {
+            _log.Write("TunnelClientVersion=latest：使用旧版布局缓存，实际版本未核对；不会自动检查更新。指定明确版本可安装到独立目录。");
             return AppPaths.TunnelClientExe;
+        }
+
+        if (tag is not null)
+        {
+            var cachedDirectory = TunnelVersionPolicy.ReleaseDirectory(root, tag);
+            if (Directory.Exists(cachedDirectory))
+            {
+                if (!TunnelVersionPolicy.IsValidInstall(cachedDirectory, tag))
+                    throw new InvalidDataException($"tunnel-client {tag} 缓存不完整或完整性校验失败；请在停止服务后检查该版本目录。");
+                _log.Write($"tunnel-client 安装来源：{tag}；缓存完整性检查通过（不是发布者签名验证）。");
+                return Path.Combine(cachedDirectory, "tunnel-client.exe");
+            }
+        }
 
         if (!config.AutoDownloadTunnelClient)
-            throw new FileNotFoundException("未找到 tunnel-client.exe，且自动下载已关闭。", AppPaths.TunnelClientExe);
-
+            throw new FileNotFoundException($"没有匹配 {requested} 的已验证缓存，且自动下载已关闭。");
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             throw new PlatformNotSupportedException("tunnel-client 自动安装仅支持 Windows。");
-
         if (RuntimeInformation.OSArchitecture != Architecture.X64)
             throw new PlatformNotSupportedException($"当前仅自动下载 Windows x64 tunnel-client。检测到架构：{RuntimeInformation.OSArchitecture}");
 
         using var http = CreateHttpClient(config);
-        var (tag, assetUrl) = await ResolveTunnelClientReleaseAsync(http, config.TunnelClientVersion, cancellationToken);
-
-        _log.Write($"正在下载 OpenAI tunnel-client {tag}…");
+        var release = await ResolveTunnelClientReleaseAsync(http, tag ?? requested, cancellationToken)
+            .ConfigureAwait(false);
+        tag = TunnelVersionPolicy.Normalize(release.Tag);
+        var destination = TunnelVersionPolicy.ReleaseDirectory(root, tag);
+        var selectedExe = Path.Combine(destination, "tunnel-client.exe");
         var tempZip = Path.Combine(Path.GetTempPath(), $"tunnel-client-{Guid.NewGuid():N}.zip");
         var tempDir = Path.Combine(Path.GetTempPath(), $"tunnel-client-{Guid.NewGuid():N}");
+        // Staging on the destination volume allows an atomic directory rename.
+        var staging = Path.Combine(root, $".install-{Guid.NewGuid():N}");
+        var pointerTemp = Path.Combine(root, $".version-{Guid.NewGuid():N}.tmp");
 
         try
         {
-            await using (var input = await http.GetStreamAsync(assetUrl, cancellationToken))
-            await using (var output = File.Create(tempZip))
-                await input.CopyToAsync(output, cancellationToken);
-
-            Directory.CreateDirectory(tempDir);
-            ZipFile.ExtractToDirectory(tempZip, tempDir, overwriteFiles: true);
-
-            var exe = Directory.GetFiles(tempDir, "tunnel-client.exe", SearchOption.AllDirectories).FirstOrDefault();
-            if (exe is null)
-                throw new InvalidDataException("下载包中没有找到 tunnel-client.exe。");
-
-            Directory.CreateDirectory(AppPaths.TunnelClientDirectory);
-            File.Copy(exe, AppPaths.TunnelClientExe, overwrite: true);
-
-            foreach (var optional in new[] { "cloudflared.exe", "cloudflared-manifest.json", "LICENSE" })
+            if (!Directory.Exists(destination))
             {
-                var match = Directory.GetFiles(tempDir, optional, SearchOption.AllDirectories).FirstOrDefault();
-                if (match is not null)
-                    File.Copy(match, Path.Combine(AppPaths.TunnelClientDirectory, optional), overwrite: true);
+                _log.Write($"正在下载 OpenAI tunnel-client {tag}…");
+                await using (var input = await http.GetStreamAsync(release.Url, cancellationToken).ConfigureAwait(false))
+                await using (var output = File.Create(tempZip))
+                    await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
+
+                Directory.CreateDirectory(tempDir);
+                ZipFile.ExtractToDirectory(tempZip, tempDir);
+                var executables = Directory.GetFiles(tempDir, "tunnel-client.exe", SearchOption.AllDirectories);
+                if (executables.Length != 1)
+                    throw new InvalidDataException("下载包必须包含唯一的 tunnel-client.exe。");
+
+                Directory.CreateDirectory(staging);
+                File.Copy(executables[0], Path.Combine(staging, "tunnel-client.exe"));
+                foreach (var optional in new[] { "cloudflared.exe", "cloudflared-manifest.json", "LICENSE" })
+                {
+                    var matches = Directory.GetFiles(tempDir, optional, SearchOption.AllDirectories);
+                    if (matches.Length > 1)
+                        throw new InvalidDataException($"下载包包含重复的 {optional}。");
+                    if (matches.Length == 1) File.Copy(matches[0], Path.Combine(staging, optional));
+                }
+                TunnelVersionPolicy.WriteReceipt(staging, tag);
+                cancellationToken.ThrowIfCancellationRequested();
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                try { Directory.Move(staging, destination); }
+                catch (IOException) when (TunnelVersionPolicy.IsValidInstall(destination, tag))
+                {
+                    // Another launcher installed the same release; never overwrite it.
+                }
             }
 
-            _log.Write($"tunnel-client 已安装：{AppPaths.TunnelClientExe}");
-            return AppPaths.TunnelClientExe;
+            if (!TunnelVersionPolicy.IsValidInstall(destination, tag))
+                throw new InvalidDataException("安装目录未通过完整性校验；未切换当前版本。");
+            cancellationToken.ThrowIfCancellationRequested();
+            if (requested == "latest")
+            {
+                await File.WriteAllTextAsync(pointerTemp, tag, cancellationToken).ConfigureAwait(false);
+                File.Move(pointerTemp, pointer, overwrite: true);
+            }
+            _log.Write($"tunnel-client 安装来源 {tag}：{selectedExe}");
+            return selectedExe;
         }
         finally
         {
-            try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
-            try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch { }
+            try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            try { if (File.Exists(pointerTemp)) File.Delete(pointerTemp); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            try { if (Directory.Exists(staging)) Directory.Delete(staging, true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
     }
 
@@ -170,7 +235,6 @@ internal sealed class Bootstrapper
         // which previously caused Install/Start/Doctor to all fail with HTTP 403.
         // GitHub's normal releases/latest page redirects to /releases/tag/<version>, which is enough.
         const string latestPage = "https://github.com/openai/tunnel-client/releases/latest";
-        const string fallbackTag = "v0.0.11";
 
         try
         {
@@ -187,13 +251,17 @@ internal sealed class Bootstrapper
                 throw new InvalidDataException($"无法从 GitHub Release 最终地址解析版本：{finalUri}");
 
             _log.Write($"已解析 tunnel-client 最新版本：{resolvedTag}（未调用 GitHub API）。");
+            resolvedTag = NormalizeTag(resolvedTag);
             return (resolvedTag, BuildTunnelClientAssetUrl(resolvedTag));
         }
-        catch (Exception ex) when (ex is HttpRequestException or InvalidDataException or TaskCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _log.Write($"解析 tunnel-client 最新版本失败：{ex.Message}");
-            _log.Write($"改用兼容回退版本 {fallbackTag}。可在 config.json 的 TunnelClientVersion 中指定其他版本。");
-            return (fallbackTag, BuildTunnelClientAssetUrl(fallbackTag));
+            throw;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidDataException or OperationCanceledException)
+        {
+            throw new InvalidOperationException(
+                "无法解析 tunnel-client 最新版本；未回退到旧版本。请检查网络或显式指定 TunnelClientVersion。", ex);
         }
     }
 
@@ -203,12 +271,11 @@ internal sealed class Bootstrapper
         _log.Write(proxy.Description);
         var http = ProxyResolver.CreateHttpClient(config);
         http.Timeout = TimeSpan.FromMinutes(5);
-        http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ChatGPT-Windows-MCP", "0.1.1"));
+        http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ChatGPT-Windows-MCP", "0.1.2"));
         return http;
     }
 
-    private static string NormalizeTag(string version) =>
-        version.StartsWith("v", StringComparison.OrdinalIgnoreCase) ? version : "v" + version;
+    private static string NormalizeTag(string version) => TunnelVersionPolicy.Normalize(version);
 
     private static string BuildTunnelClientAssetUrl(string tag) =>
         $"https://github.com/openai/tunnel-client/releases/download/{tag}/tunnel-client-{tag}-windows-amd64.zip";

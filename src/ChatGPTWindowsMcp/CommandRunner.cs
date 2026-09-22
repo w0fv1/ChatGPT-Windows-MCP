@@ -12,8 +12,12 @@ internal static class CommandRunner
         string? workingDirectory = null,
         LogSink? log = null,
         string source = "cmd",
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        TimeSpan? timeout = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(timeout ?? TimeSpan.FromMinutes(10));
         var psi = new ProcessStartInfo
         {
             FileName = fileName,
@@ -59,37 +63,50 @@ internal static class CommandRunner
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        await process.WaitForExitAsync(cancellationToken);
-        return (process.ExitCode, output.ToString());
+        try
+        {
+            await process.WaitForExitAsync(deadline.Token).ConfigureAwait(false);
+            lock (output) return (process.ExitCode, output.ToString());
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelling WaitForExitAsync alone does not terminate the child.
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+                using var cleanupDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await process.WaitForExitAsync(cleanupDeadline.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or OperationCanceledException)
+            {
+                log?.Write(source, "命令取消后的进程清理未能完成；请检查残留进程。");
+            }
+            if (cancellationToken.IsCancellationRequested) throw;
+            throw new TimeoutException($"{source} 执行超时，已请求结束所启动的进程树。");
+        }
     }
 
     public static string? FindOnPath(string command)
     {
-        try
+        if (string.IsNullOrWhiteSpace(command)) return null;
+        // No synchronous where.exe/ReadToEnd() call can wedge the UI thread.
+        var names = OperatingSystem.IsWindows() && !Path.HasExtension(command)
+            ? new[] { command + ".exe", command }
+            : new[] { command };
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "")
+                     .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {
-            var psi = new ProcessStartInfo
+            foreach (var name in names)
             {
-                FileName = "where.exe",
-                Arguments = command,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-            using var p = Process.Start(psi);
-            if (p is null) return null;
-
-            var output = p.StandardOutput.ReadToEnd();
-            p.WaitForExit(3000);
-
-            return p.ExitCode == 0
-                ? output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()
-                : null;
+                try
+                {
+                    var path = Path.GetFullPath(Path.Combine(
+                        Environment.ExpandEnvironmentVariables(directory.Trim().Trim('"')), name));
+                    if (File.Exists(path)) return path;
+                }
+                catch (Exception ex) when (ex is ArgumentException or NotSupportedException or IOException) { }
+            }
         }
-        catch
-        {
-            return null;
-        }
+        return null;
     }
 }

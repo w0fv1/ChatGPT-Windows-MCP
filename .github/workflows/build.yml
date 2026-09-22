@@ -30,6 +30,9 @@ jobs:
       - name: Build with warnings as errors
         run: dotnet build .\src\ChatGPTWindowsMcp\ChatGPTWindowsMcp.csproj -c Release --no-restore -warnaserror
 
+      - name: Run launcher regression tests
+        run: dotnet run --project .\tests\Launcher.RegressionTests\Launcher.RegressionTests.csproj -c Release
+
       - name: Publish portable single-file
         shell: pwsh
         run: .\scripts\publish.ps1
