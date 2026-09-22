@@ -20,6 +20,7 @@ public partial class MainWindow : Window
     private bool _syncingApiKey;
     private bool _shutdownInProgress;
     private bool _shutdownComplete;
+    private readonly CancellationTokenSource _windowLifetime = new();
 
     public MainWindow()
     {
@@ -57,6 +58,7 @@ public partial class MainWindow : Window
             return;
 
         _shutdownInProgress = true;
+        _windowLifetime.Cancel();
         IsEnabled = false;
         _operationMessage = "正在退出并清理本地资源…";
         RenderMainState();
@@ -96,7 +98,8 @@ public partial class MainWindow : Window
     {
         if (!Dispatcher.CheckAccess())
         {
-            Dispatcher.Invoke(RenderMainState);
+            if (!Dispatcher.HasShutdownStarted)
+                Dispatcher.BeginInvoke(RenderMainState);
             return;
         }
 
@@ -116,12 +119,17 @@ public partial class MainWindow : Window
         var configured = IsConfigured();
         var partiallyConfigured = IsTunnelIdValid(_config.TunnelId) || !string.IsNullOrWhiteSpace(_config.RuntimeApiKey);
 
-        switch (_runtime.State)
+        var health = _runtime.Health;
+        switch (health.State)
         {
             case RuntimeState.Running:
-                StatusTitleText.Text = "● 已连接";
-                StatusTitleText.Foreground = ResourceBrush("SuccessBrush", Brushes.ForestGreen);
-                StatusDetailText.Text = "Windows MCP 已通过 OpenAI Tunnel 连接。";
+                StatusTitleText.Text = RuntimeHealthState.RunningTitle(health);
+                StatusTitleText.Foreground = health.McpReady && health.TunnelReady == true
+                    ? ResourceBrush("SuccessBrush", Brushes.ForestGreen)
+                    : ResourceBrush("WarningBrush", Brushes.DarkGoldenrod);
+                StatusDetailText.Text = health.Detail +
+                    (health.ObservedAt is { } observed ? $" 检查时间：{observed.ToLocalTime():HH:mm:ss}。" : "") +
+                    " 当前聊天的工具清单、权限及协议会话仍需在 ChatGPT 中核对。";
                 PrimaryButton.Content = "停止";
                 PrimaryButton.IsEnabled = true;
                 OpenChatGptButton.Visibility = Visibility.Visible;
@@ -155,7 +163,7 @@ public partial class MainWindow : Window
                 StatusTitleText.Text = "● 连接失败";
                 StatusTitleText.Foreground = ResourceBrush("DangerBrush", Brushes.Firebrick);
                 StatusDetailText.Text = configured
-                    ? "配置已保存，可以重试；详细错误可在高级选项中查看。"
+                    ? health.Detail + " 其余子进程可能仍在运行；重试或重新配置会先清理，不会重放工具操作。"
                     : "请先完成连接配置。";
                 PrimaryButton.Content = configured ? "重新连接" : partiallyConfigured ? "继续配置" : "创建链接";
                 PrimaryButton.IsEnabled = true;
@@ -179,7 +187,7 @@ public partial class MainWindow : Window
                     StatusTitleText.Foreground = ResourceBrush("WarningBrush", Brushes.DarkGoldenrod);
                     StatusDetailText.Text = "继续完成连接配置后即可启动。";
                     PrimaryButton.Content = "继续配置";
-                    ReconfigureButton.Visibility = Visibility.Collapsed;
+                    ReconfigureButton.Visibility = Visibility.Visible;
                 }
                 else
                 {
@@ -199,6 +207,7 @@ public partial class MainWindow : Window
 
     private async void PrimaryButton_Click(object sender, RoutedEventArgs e)
     {
+        if (_operationMessage is not null || _shutdownInProgress) return;
         if (_runtime.State == RuntimeState.Running)
         {
             SetOperation("正在停止…");
@@ -231,15 +240,17 @@ public partial class MainWindow : Window
 
         try
         {
-            await _runtime.InstallDependenciesAsync(_config);
+            await _runtime.InstallDependenciesAsync(_config, _windowLifetime.Token);
             SetOperation("正在连接 OpenAI Tunnel…");
-            await _runtime.StartAsync(_config);
+            await _runtime.StartAsync(_config, _windowLifetime.Token);
 
             if (_config.AutoOpenChatGptConnectors)
                 OpenUrl(ChatGptConnectorsUrl);
         }
+        catch (OperationCanceledException) when (_windowLifetime.IsCancellationRequested) { }
         catch (Exception ex)
         {
+            if (_shutdownInProgress) return;
             _logSink.Write($"启动失败：{ex.Message}");
             AdvancedExpander.IsExpanded = true;
             MessageBox.Show(ex.Message, "连接失败", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -256,7 +267,23 @@ public partial class MainWindow : Window
         RenderMainState();
     }
 
-    private void ReconfigureButton_Click(object sender, RoutedEventArgs e) => ShowWizard(startFromBeginning: true);
+    private async void ReconfigureButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_operationMessage is not null || _shutdownInProgress) return;
+        if (_runtime.State != RuntimeState.Stopped)
+        {
+            SetOperation("正在清理上次运行…");
+            try { await _runtime.StopAsync(); }
+            catch (Exception ex)
+            {
+                if (!_shutdownInProgress)
+                    MessageBox.Show(ex.Message, "停止失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            finally { SetOperation(null); }
+        }
+        if (!_shutdownInProgress && !_shutdownComplete) ShowWizard(startFromBeginning: true);
+    }
     private void OpenChatGptButton_Click(object sender, RoutedEventArgs e) => OpenUrl(ChatGptConnectorsUrl);
 
     private void ShowWizard(bool startFromBeginning)
@@ -686,6 +713,13 @@ public partial class MainWindow : Window
 
     private async void DoctorButton_Click(object sender, RoutedEventArgs e)
     {
+        if (_operationMessage is not null || _shutdownInProgress) return;
+        if (_runtime.State == RuntimeState.Running)
+        {
+            MessageBox.Show(_runtime.Health.Detail + "\n请先停止服务，再执行 doctor 诊断。",
+                "运行中健康状态", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
         if (!IsConfigured())
         {
             MessageBox.Show("请先完成 Tunnel ID 和 Runtime API Key 配置。", "连接诊断", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -702,16 +736,18 @@ public partial class MainWindow : Window
 
         try
         {
-            await _runtime.InstallDependenciesAsync(_config);
-            var exitCode = await _runtime.DoctorAsync(_config);
+            await _runtime.InstallDependenciesAsync(_config, _windowLifetime.Token);
+            var exitCode = await _runtime.DoctorAsync(_config, _windowLifetime.Token);
             MessageBox.Show(
                 exitCode == 0 ? "诊断完成，未发现阻断性错误。" : $"诊断退出码：{exitCode}。请查看运行日志。",
                 "连接诊断",
                 MessageBoxButton.OK,
                 exitCode == 0 ? MessageBoxImage.Information : MessageBoxImage.Warning);
         }
+        catch (OperationCanceledException) when (_windowLifetime.IsCancellationRequested) { }
         catch (Exception ex)
         {
+            if (_shutdownInProgress) return;
             MessageBox.Show(ex.Message, "诊断失败", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
@@ -726,6 +762,7 @@ public partial class MainWindow : Window
 
     private void OnLogLine(string line)
     {
+        if (Dispatcher.HasShutdownStarted || _shutdownComplete) return;
         if (!Dispatcher.CheckAccess())
         {
             Dispatcher.BeginInvoke(() => AppendLog(line));
@@ -737,6 +774,8 @@ public partial class MainWindow : Window
 
     private void AppendLog(string line)
     {
+        // Bound the UI buffer; the on-disk log is the diagnostic source.
+        if (LogTextBox.Text.Length > 200_000) LogTextBox.Clear();
         LogTextBox.AppendText(line + Environment.NewLine);
         LogTextBox.ScrollToEnd();
     }

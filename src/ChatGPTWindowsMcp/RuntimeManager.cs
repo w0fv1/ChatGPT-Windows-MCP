@@ -3,33 +3,29 @@ using System.Net.Sockets;
 
 namespace ChatGPTWindowsMcp;
 
-internal enum RuntimeState
-{
-    Stopped,
-    Starting,
-    Running,
-    Stopping,
-    Faulted
-}
-
 internal sealed class RuntimeManager : IDisposable
 {
     private readonly LogSink _log;
     private readonly Bootstrapper _bootstrapper;
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+    private readonly object _processGate = new();
+    private readonly RuntimeHealthState _health = new();
 
     private Process? _mcpProcess;
     private Process? _tunnelProcess;
     private bool _ownsMcp;
     private int? _ownedMcpPort;
-    private int? _mcpListenerPid;
     private CancellationTokenSource? _lifetimeCts;
     private TaskCompletionSource<bool>? _tunnelReadySignal;
     private OwnedProcessJob? _processJob;
+    private Task? _monitorTask;
+    private string? _healthUrlFile;
+    private volatile bool _disposed;
 
-    public RuntimeState State { get; private set; } = RuntimeState.Stopped;
-    public bool McpReady { get; private set; }
-    public bool TunnelReady { get; private set; }
-
+    public RuntimeHealthSnapshot Health => _health.Snapshot;
+    public RuntimeState State => Health.State;
+    public bool McpReady => Health.McpReady;
+    public bool TunnelReady => Health.TunnelReady == true;
     public event Action<RuntimeState>? StateChanged;
     public event Action? HealthChanged;
 
@@ -41,222 +37,245 @@ internal sealed class RuntimeManager : IDisposable
 
     public async Task InstallDependenciesAsync(AppConfig config, CancellationToken cancellationToken = default)
     {
-        var uv = _bootstrapper.FindUv();
-        if (uv is null)
-            await _bootstrapper.InstallUvWithWingetAsync(config, cancellationToken);
-        else
-            _log.Write($"uv 已存在：{uv}");
-
-        var runner = _bootstrapper.FindPythonToolRunner();
-        if (runner is null)
-            throw new InvalidOperationException("uv 已安装，但找不到 uvx.exe 或 uv tool run。请重新启动程序后再试。");
-
-        _log.Write(runner.Value.PrefixArgs.Length == 0
-            ? $"Python 工具运行器：{runner.Value.FileName}（uvx 模式）"
-            : $"Python 工具运行器：{runner.Value.FileName} tool run（uv 兼容模式）");
-
-        var tunnelClient = await _bootstrapper.EnsureTunnelClientAsync(config, cancellationToken);
-        _log.Write($"tunnel-client 已可用：{tunnelClient}");
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (State is RuntimeState.Running or RuntimeState.Starting)
+                throw new InvalidOperationException("请先停止服务，再安装或检查依赖。");
+            var uv = _bootstrapper.FindUv();
+            if (uv is null)
+                await _bootstrapper.InstallUvWithWingetAsync(config, cancellationToken).ConfigureAwait(false);
+            else
+                _log.Write($"uv 已存在：{uv}");
+            var runner = _bootstrapper.FindPythonToolRunner();
+            if (runner is null)
+                throw new InvalidOperationException("找不到 uvx.exe 或 uv tool run。安装 uv 后请重新启动程序。");
+            var tunnelClient = await _bootstrapper.EnsureTunnelClientAsync(config, cancellationToken).ConfigureAwait(false);
+            _log.Write($"tunnel-client 已可用：{tunnelClient}");
+        }
+        finally { _lifecycleGate.Release(); }
     }
 
     public async Task StartAsync(AppConfig config, CancellationToken cancellationToken = default)
     {
-        if (State is RuntimeState.Starting or RuntimeState.Running)
-            return;
-
-        SetState(RuntimeState.Starting);
-        McpReady = false;
-        TunnelReady = false;
-        HealthChanged?.Invoke();
-
-        _lifetimeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var ct = _lifetimeCts.Token;
-
-        _processJob?.Dispose();
-        _processJob = OwnedProcessJob.TryCreate(_log);
-
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var runner = _bootstrapper.FindPythonToolRunner();
-            if (runner is null)
-                throw new InvalidOperationException("未找到 uvx.exe 或 uv.exe。请先点击“安装/检查依赖”。");
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (State is RuntimeState.Starting or RuntimeState.Running) return;
+            var errors = config.Validate();
+            if (errors.Count != 0) throw new ArgumentException(string.Join(Environment.NewLine, errors));
 
-            var tunnelClient = await _bootstrapper.EnsureTunnelClientAsync(config, ct);
-
-            if (await IsPortOpenAsync(config.McpPort, TimeSpan.FromMilliseconds(500)))
+            // Fence old callbacks before cleanup. A concurrent Stop invalidates
+            // this generation even if no new lifetime CTS has been assigned yet.
+            var generation = _health.BeginStart();
+            PublishState();
+            try
             {
-                if (!config.ReuseExistingMcp)
-                    throw new InvalidOperationException($"端口 {config.McpPort} 已被占用。请停止现有服务或开启“复用已运行的 Windows-MCP”。");
+                await Task.Run(StopInternalAsync).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                var healthFile = Path.Combine(AppPaths.RuntimeDirectory, $"tunnel-health-{Guid.NewGuid():N}.txt");
+                CancellationToken ct;
+                lock (_processGate)
+                {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
+                    if (_health.Generation != generation || State != RuntimeState.Starting)
+                        throw new OperationCanceledException("启动已被停止请求取消。");
+                    _lifetimeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    ct = _lifetimeCts.Token;
+                    _processJob = OwnedProcessJob.TryCreate(_log);
+                    _healthUrlFile = healthFile;
+                }
+                var runner = _bootstrapper.FindPythonToolRunner();
+                if (runner is null) throw new InvalidOperationException("未找到 uvx.exe 或 uv.exe。请先安装依赖。");
+                var tunnelClient = await _bootstrapper.EnsureTunnelClientAsync(config, ct).ConfigureAwait(false);
 
-                _ownsMcp = false;
-                _ownedMcpPort = null;
-                _mcpListenerPid = null;
-                McpReady = true;
-                _log.Write($"检测到 127.0.0.1:{config.McpPort} 已有服务，复用现有 MCP。");
-                HealthChanged?.Invoke();
+                if (await IsPortOpenAsync(config.McpPort, TimeSpan.FromMilliseconds(500)).ConfigureAwait(false))
+                {
+                    if (!config.ReuseExistingMcp)
+                        throw new InvalidOperationException($"端口 {config.McpPort} 已被占用。请停止现有服务或开启复用。");
+                    _ownsMcp = false;
+                    _log.Write($"复用 127.0.0.1:{config.McpPort}；端口开放不是服务身份验证，随后仍需 doctor 检查。");
+                }
+                else
+                {
+                    _ownsMcp = true;
+                    _ownedMcpPort = config.McpPort;
+                    _mcpProcess = StartWindowsMcp(runner.Value.FileName, runner.Value.PrefixArgs, config, ct);
+                    await WaitForPortAsync(config.McpPort, TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
+                    _log.Write($"本地 TCP 已监听 127.0.0.1:{config.McpPort}。");
+                }
+
+                await _bootstrapper.CreateOrRefreshProfileAsync(config, tunnelClient, ct).ConfigureAwait(false);
+                var doctorExit = await DoctorAsync(config, tunnelClient, ct).ConfigureAwait(false);
+                if (doctorExit != 0)
+                    throw new InvalidOperationException($"Tunnel doctor 检查失败，退出码 {doctorExit}。请查看日志。");
+
+                _tunnelReadySignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _tunnelProcess = StartTunnel(tunnelClient, config, ct);
+                await WaitForTunnelReadyAsync(config.McpPort, healthFile, generation, ct).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                if (!_health.MarkRunning(generation))
+                    throw new InvalidOperationException("启动期间运行状态已改变；未将失效运行标记为成功。");
+                PublishState();
+                _monitorTask = Task.Run(() => MonitorHealthAsync(config.McpPort, healthFile, generation, ct));
+                _log.Write("本地启动流程完成；健康检查不代表当前 ChatGPT 会话或写入工具已可用。不会自动重放工具调用。");
             }
-            else
+            catch (Exception ex)
             {
-                _ownsMcp = true;
-                _ownedMcpPort = config.McpPort;
-                _mcpProcess = StartWindowsMcp(runner.Value.FileName, runner.Value.PrefixArgs, config, ct);
-                await WaitForPortAsync(config.McpPort, TimeSpan.FromSeconds(60), ct);
-                _mcpListenerPid = FindListeningProcessId(config.McpPort);
-                McpReady = true;
-                _log.Write($"Windows-MCP 已监听 http://127.0.0.1:{config.McpPort}/mcp" +
-                           (_mcpListenerPid is int pid ? $"（PID {pid}）" : ""));
-                HealthChanged?.Invoke();
+                _health.Fail(generation, cancellationToken.IsCancellationRequested
+                    ? "启动已取消。" : $"启动失败：{ex.Message}");
+                PublishState();
+                await Task.Run(StopInternalAsync).ConfigureAwait(false);
+                if (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested && !_disposed)
+                    throw new InvalidOperationException(Health.Detail, ex);
+                throw;
             }
-
-            await _bootstrapper.CreateOrRefreshProfileAsync(config, tunnelClient, ct);
-
-            var doctorExit = await DoctorAsync(config, tunnelClient, ct);
-            if (doctorExit != 0)
-                throw new InvalidOperationException($"Tunnel doctor 检查失败，退出码 {doctorExit}。请查看日志。");
-
-            _tunnelReadySignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _tunnelProcess = StartTunnel(tunnelClient, config, ct);
-
-            var readyTask = _tunnelReadySignal.Task;
-            var readinessTimeout = Task.Delay(TimeSpan.FromSeconds(60), ct);
-            var completed = await Task.WhenAny(readyTask, readinessTimeout);
-
-            if (_tunnelProcess.HasExited)
-                throw new InvalidOperationException($"tunnel-client 启动后退出，退出码 {_tunnelProcess.ExitCode}。");
-
-            if (completed != readyTask)
-                throw new TimeoutException("等待 OpenAI Tunnel Control Plane 建立连接超时。请检查代理、DNS/IPv6 和下方 tunnel 日志。");
-
-            await readyTask;
-            TunnelReady = true;
-            HealthChanged?.Invoke();
-            SetState(RuntimeState.Running);
-            _log.Write("服务已启动。现在可以在 ChatGPT 中创建/使用对应 Tunnel 的连接器。");
         }
-        catch
-        {
-            SetState(RuntimeState.Faulted);
-            await StopInternalAsync();
-            throw;
-        }
+        finally { _lifecycleGate.Release(); }
     }
 
     public async Task<int> DoctorAsync(AppConfig config, CancellationToken cancellationToken = default)
     {
-        var tunnelClient = await _bootstrapper.EnsureTunnelClientAsync(config, cancellationToken);
-        await _bootstrapper.CreateOrRefreshProfileAsync(config, tunnelClient, cancellationToken);
-        return await DoctorAsync(config, tunnelClient, cancellationToken);
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (State is RuntimeState.Running or RuntimeState.Starting or RuntimeState.Stopping)
+                throw new InvalidOperationException("运行时请查看健康状态；请先停止服务，再执行会重新生成 Profile 的 doctor 诊断。");
+            var tunnelClient = await _bootstrapper.EnsureTunnelClientAsync(config, cancellationToken).ConfigureAwait(false);
+            await _bootstrapper.CreateOrRefreshProfileAsync(config, tunnelClient, cancellationToken).ConfigureAwait(false);
+            return await DoctorAsync(config, tunnelClient, cancellationToken).ConfigureAwait(false);
+        }
+        finally { _lifecycleGate.Release(); }
     }
 
-    private async Task<int> DoctorAsync(
-        AppConfig config,
-        string tunnelClient,
-        CancellationToken cancellationToken)
+    private async Task<int> DoctorAsync(AppConfig config, string tunnelClient, CancellationToken cancellationToken)
     {
         _log.Write("执行 tunnel-client doctor…");
-
-        var env = BuildTunnelEnvironment(config);
-
-        var result = await CommandRunner.RunAsync(
-            tunnelClient,
-            new[]
-            {
-                "doctor",
-                "--profile", config.ProfileName,
-                "--profile-dir", AppPaths.ProfilesDirectory,
-                "--explain"
-            },
-            environment: env,
-            log: _log,
-            source: "doctor",
-            cancellationToken: cancellationToken);
-
+        var result = await CommandRunner.RunAsync(tunnelClient,
+            new[] { "doctor", "--profile", config.ProfileName, "--profile-dir", AppPaths.ProfilesDirectory, "--explain" },
+            environment: BuildTunnelEnvironment(config), log: _log, source: "doctor",
+            cancellationToken: cancellationToken, timeout: TimeSpan.FromMinutes(2)).ConfigureAwait(false);
         return result.ExitCode;
     }
 
     public async Task StopAsync()
     {
-        if (State == RuntimeState.Stopped)
-            return;
-
-        SetState(RuntimeState.Stopping);
-
-        // Process.Kill(entireProcessTree: true), Job Object teardown and PID
-        // discovery are OS calls that may occasionally block. Never execute
-        // them on the WPF dispatcher thread.
-        await Task.Run(StopInternalAsync).ConfigureAwait(false);
-
-        SetState(RuntimeState.Stopped);
-        _log.Write("服务已停止。");
+        // Invalidate in-flight observations before waiting for a starting run.
+        _health.BeginStop();
+        PublishState();
+        CancelLifetime();
+        await _lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await Task.Run(StopInternalAsync).ConfigureAwait(false);
+            _health.MarkStopped();
+            PublishState();
+            _log.Write("服务已停止。");
+        }
+        finally { _lifecycleGate.Release(); }
     }
 
     private async Task StopInternalAsync()
     {
-        _lifetimeCts?.Cancel();
-
-        // Closing the Job Object is a synchronous OS-level safety net.
-        _processJob?.Dispose();
-        _processJob = null;
-
-        await StopProcessAsync(_tunnelProcess, "tunnel-client").ConfigureAwait(false);
-        _tunnelProcess = null;
-        _tunnelReadySignal = null;
-        TunnelReady = false;
-
-        if (_ownsMcp)
+        var lifetime = Interlocked.Exchange(ref _lifetimeCts, null);
+        try { lifetime?.Cancel(); } catch (ObjectDisposedException) { }
+        var monitor = Interlocked.Exchange(ref _monitorTask, null);
+        if (monitor is not null)
         {
-            await StopProcessAsync(_mcpProcess, "Windows-MCP 启动器").ConfigureAwait(false);
-            await StopOwnedMcpListenerAsync(_ownedMcpPort, _mcpListenerPid).ConfigureAwait(false);
+            try { await monitor.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
         }
-
+        Interlocked.Exchange(ref _processJob, null)?.Dispose();
+        await StopProcessAsync(Interlocked.Exchange(ref _tunnelProcess, null)).ConfigureAwait(false);
+        _tunnelReadySignal = null;
+        if (_ownsMcp)
+            await StopProcessAsync(Interlocked.Exchange(ref _mcpProcess, null)).ConfigureAwait(false);
         _mcpProcess = null;
+
+        // A port is not proof of ownership. Never discover an arbitrary PID and
+        // kill it just because it now owns the old port.
+        if (_ownsMcp && _ownedMcpPort is int port &&
+            await IsPortOpenAsync(port, TimeSpan.FromMilliseconds(150)).ConfigureAwait(false))
+            _log.Write($"停止后端口 {port} 仍在监听；未终止无法确认归属的进程，请手动核对。");
         _ownsMcp = false;
         _ownedMcpPort = null;
-        _mcpListenerPid = null;
-        McpReady = false;
-        HealthChanged?.Invoke();
-
-        _lifetimeCts?.Dispose();
-        _lifetimeCts = null;
+        lifetime?.Dispose();
+        var healthFile = Interlocked.Exchange(ref _healthUrlFile, null);
+        try { if (healthFile is not null) File.Delete(healthFile); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
-    private Process StartWindowsMcp(
-        string runnerFileName,
-        IReadOnlyList<string> runnerPrefixArgs,
-        AppConfig config,
-        CancellationToken cancellationToken)
+    private async Task WaitForTunnelReadyAsync(int port, string healthFile, long generation, CancellationToken ct)
     {
-        var args = new List<string>();
-        args.AddRange(runnerPrefixArgs);
+        using var probe = new TunnelHealthProbe();
+        var timer = Stopwatch.StartNew();
+        while (timer.Elapsed < TimeSpan.FromSeconds(60))
+        {
+            ct.ThrowIfCancellationRequested();
+            var observation = await probe.CheckAsync(port, healthFile, ct).ConfigureAwait(false);
+            if (_health.Observe(generation, observation)) HealthChanged?.Invoke();
+            if (observation.McpPortOpen && observation.TunnelReady == true) return;
+            if (observation.McpPortOpen && observation.TunnelReady is null &&
+                _tunnelReadySignal?.Task.IsCompletedSuccessfully == true)
+            {
+                _log.Write("已观察到隧道元数据日志，但无可用健康接口；以未验证状态运行，不显示已连接。");
+                return;
+            }
+            await Task.Delay(500, ct).ConfigureAwait(false);
+        }
+        throw new TimeoutException("隧道启动就绪检查超时；请查看本地端口、代理及 tunnel 日志。");
+    }
+
+    private async Task MonitorHealthAsync(int port, string healthFile, long generation, CancellationToken ct)
+    {
+        using var probe = new TunnelHealthProbe();
+        string? lastDetail = null;
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            {
+                var observation = await probe.CheckAsync(port, healthFile, ct).ConfigureAwait(false);
+                if (!_health.Observe(generation, observation)) return;
+                HealthChanged?.Invoke();
+                if (lastDetail != observation.Detail)
+                {
+                    _log.Write("health", observation.Detail);
+                    lastDetail = observation.Detail;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            if (_health.Fail(generation, $"健康监测异常（{ex.GetType().Name}），状态不再视为正常。"))
+                PublishState();
+        }
+    }
+
+    private Process StartWindowsMcp(string runnerFileName, IReadOnlyList<string> runnerPrefixArgs,
+        AppConfig config, CancellationToken ct)
+    {
+        var args = new List<string>(runnerPrefixArgs);
         args.AddRange(new[]
         {
-            "--python", config.PythonVersion,
-            config.WindowsMcpSpec,
-            "serve",
-            "--transport", "streamable-http",
-            "--host", "127.0.0.1",
-            "--port", config.McpPort.ToString()
+            "--python", config.PythonVersion, config.WindowsMcpSpec, "serve",
+            "--transport", "streamable-http", "--host", "127.0.0.1", "--port", config.McpPort.ToString()
         });
-
-        _log.Write("完整工具模式：不传递 --exclude-tools，Windows-MCP 将暴露其全部可用工具。");
-        _log.Write(runnerPrefixArgs.Count == 0
-            ? $"使用 uvx 启动 Windows-MCP：{runnerFileName}"
-            : $"使用 uv tool run 启动 Windows-MCP：{runnerFileName}");
-        _log.Write("正在启动 Windows-MCP…");
-        var env = ProxyResolver.BuildNetworkEnvironment(config);
-        return StartLongRunningProcess(runnerFileName, args, env, "windows-mcp", cancellationToken);
+        _log.Write("完整工具模式：不传递 --exclude-tools；ChatGPT 侧实际可用工具仍需单独核对。");
+        return StartLongRunningProcess(runnerFileName, args,
+            ProxyResolver.BuildNetworkEnvironment(config), "windows-mcp", ct);
     }
 
     private Dictionary<string, string?> BuildTunnelEnvironment(AppConfig config)
     {
-        var env = new Dictionary<string, string?>
-        {
-            ["CONTROL_PLANE_API_KEY"] = config.RuntimeApiKey
-        };
-
+        var env = new Dictionary<string, string?> { ["CONTROL_PLANE_API_KEY"] = config.RuntimeApiKey };
         var proxy = ProxyResolver.ResolveControlPlaneProxy(config);
         _log.Write(proxy.Description);
-
         if (proxy.HasProxy)
         {
             env["CONTROL_PLANE_HTTP_PROXY"] = proxy.ProxyUrl;
@@ -265,327 +284,173 @@ internal sealed class RuntimeManager : IDisposable
             env["http_proxy"] = proxy.ProxyUrl;
             env["https_proxy"] = proxy.ProxyUrl;
         }
-        else
-            env["CONTROL_PLANE_HTTP_PROXY"] = null;
-
+        else env["CONTROL_PLANE_HTTP_PROXY"] = null;
         return env;
     }
-    private Process StartTunnel(string tunnelClient, AppConfig config, CancellationToken cancellationToken)
+
+    private Process StartTunnel(string tunnelClient, AppConfig config, CancellationToken ct)
     {
         var env = BuildTunnelEnvironment(config);
-
-        _log.Write("正在启动 OpenAI Secure MCP Tunnel…");
-        return StartLongRunningProcess(
-            tunnelClient,
-            new[]
-            {
-                "run",
-                "--profile", config.ProfileName,
-                "--profile-dir", AppPaths.ProfilesDirectory
-            },
-            env,
-            "tunnel",
-            cancellationToken);
+        // init already sets a loopback ephemeral health listener. Newer clients
+        // write its base URL here; older clients may ignore this environment key.
+        env["HEALTH_URL_FILE"] = _healthUrlFile;
+        return StartLongRunningProcess(tunnelClient,
+            new[] { "run", "--profile", config.ProfileName, "--profile-dir", AppPaths.ProfilesDirectory },
+            env, "tunnel", ct);
     }
 
-    private Process StartLongRunningProcess(
-        string fileName,
-        IEnumerable<string> arguments,
-        IDictionary<string, string?>? environment,
-        string source,
-        CancellationToken cancellationToken)
+    private Process StartLongRunningProcess(string fileName, IEnumerable<string> arguments,
+        IDictionary<string, string?>? environment, string source, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
+        var generation = _health.Generation;
+        var lifetime = _lifetimeCts;
+        var readySignal = _tunnelReadySignal;
         var psi = new ProcessStartInfo
         {
-            FileName = fileName,
-            WorkingDirectory = AppPaths.BaseDirectory,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
+            FileName = fileName, WorkingDirectory = AppPaths.BaseDirectory,
+            UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true
         };
-
-        foreach (var arg in arguments)
-            psi.ArgumentList.Add(arg);
-
+        foreach (var arg in arguments) psi.ArgumentList.Add(arg);
         if (environment is not null)
-        {
             foreach (var kv in environment)
-            {
                 if (kv.Value is null) psi.Environment.Remove(kv.Key);
                 else psi.Environment[kv.Key] = kv.Value;
-            }
-        }
 
         var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-
-        process.OutputDataReceived += (_, e) =>
+        void OnLine(object? sender, DataReceivedEventArgs e)
         {
-            if (e.Data is null)
-                return;
-
+            if (e.Data is null) return;
             _log.Write(source, e.Data);
-
-            if (source == "tunnel" &&
-                e.Data.Contains("tunnel metadata fetched", StringComparison.OrdinalIgnoreCase))
-            {
-                _tunnelReadySignal?.TrySetResult(true);
-            }
-        };
-
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data is null)
-                return;
-
-            _log.Write(source, e.Data);
-
-            if (source == "tunnel" &&
-                e.Data.Contains("tunnel metadata fetched", StringComparison.OrdinalIgnoreCase))
-            {
-                _tunnelReadySignal?.TrySetResult(true);
-            }
-        };
-
+            if (source == "tunnel" && e.Data.Contains("tunnel metadata fetched", StringComparison.OrdinalIgnoreCase))
+                readySignal?.TrySetResult(true); // Compatibility only, not a green health signal.
+        }
+        process.OutputDataReceived += OnLine;
+        process.ErrorDataReceived += OnLine;
         process.Exited += (_, _) =>
         {
-            if (State is RuntimeState.Running or RuntimeState.Starting)
+            var message = $"{source} 进程已退出。";
+            try { message = $"{source} 进程已退出，退出码 {process.ExitCode}。"; }
+            catch (InvalidOperationException) { }
+            if (_health.Fail(generation, message))
             {
-                _log.Write($"{source} 进程已退出，退出码 {process.ExitCode}。");
-                if (source == "tunnel") TunnelReady = false;
-                if (source == "windows-mcp") McpReady = false;
-                HealthChanged?.Invoke();
+                // Cancel only the lifetime captured by this process, not a new run.
+                try { lifetime?.Cancel(); } catch (ObjectDisposedException) { }
+                readySignal?.TrySetCanceled();
+                PublishState();
+                _log.Write(message);
             }
         };
-
-        if (!process.Start())
-            throw new InvalidOperationException($"无法启动 {fileName}");
-
-        // Assign the direct child before it can create long-lived descendants.
-        // Windows propagates Job membership to child processes by default, so
-        // uvx -> python/windows-mcp and tunnel-client descendants are covered.
-        _processJob?.TryAssign(process, source);
-
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-
-
-        return process;
-    }
-
-    private async Task StopOwnedMcpListenerAsync(int? port, int? expectedPid)
-    {
-        if (port is null)
-            return;
-
-        var listenerPid = FindListeningProcessId(port.Value);
-        if (listenerPid is null)
-            return;
-
-        if (expectedPid is int expected && listenerPid.Value != expected)
-        {
-            _log.Write($"端口 {port.Value} 的监听 PID 已从 {expected} 变为 {listenerPid.Value}，为避免误杀其他程序，不自动终止该进程。");
-            return;
-        }
-
         try
         {
-            using var listener = Process.GetProcessById(listenerPid.Value);
-            _log.Write($"正在停止 Windows-MCP 监听进程 PID {listenerPid.Value}…");
-            listener.Kill(entireProcessTree: true);
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            try { await listener.WaitForExitAsync(cts.Token).ConfigureAwait(false); } catch { }
-        }
-        catch (ArgumentException)
-        {
-            // Process already exited.
-        }
-        catch (Exception ex)
-        {
-            _log.Write($"停止 Windows-MCP 监听进程时出现警告：{ex.Message}");
-        }
-
-        for (var i = 0; i < 20; i++)
-        {
-            if (!await IsPortOpenAsync(port.Value, TimeSpan.FromMilliseconds(150)).ConfigureAwait(false))
-                return;
-            await Task.Delay(100).ConfigureAwait(false);
-        }
-
-        _log.Write($"警告：停止后端口 {port.Value} 仍在监听，请检查是否有其他 Windows-MCP 实例。");
-    }
-
-    private static int? FindListeningProcessId(int port, int timeoutMilliseconds = 3000)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo
+            lock (_processGate)
             {
-                FileName = "netstat.exe",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            psi.ArgumentList.Add("-ano");
-            psi.ArgumentList.Add("-p");
-            psi.ArgumentList.Add("tcp");
-
-            using var process = Process.Start(psi);
-            if (process is null)
-                return null;
-
-            var output = process.StandardOutput.ReadToEnd();
-            if (!process.WaitForExit(timeoutMilliseconds))
-            {
-                try { process.Kill(); } catch { }
-                return null;
-            }
-
-            foreach (var rawLine in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                var parts = rawLine.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length < 5 || !parts[0].Equals("TCP", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (!parts[3].Equals("LISTENING", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var localEndpoint = parts[1];
-                var colon = localEndpoint.LastIndexOf(':');
-                if (colon < 0 || !int.TryParse(localEndpoint[(colon + 1)..], out var localPort) || localPort != port)
-                    continue;
-
-                if (int.TryParse(parts[^1], out var pid) && pid > 0)
-                    return pid;
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                ct.ThrowIfCancellationRequested();
+                if (!process.Start()) throw new InvalidOperationException($"无法启动 {fileName}");
+                // Register the owned handle before ForceStop can collect it.
+                if (source == "tunnel") _tunnelProcess = process;
+                else _mcpProcess = process;
+                // Best-effort immediate job assignment; tracked process trees remain
+                // the fallback if the OS rejects assignment. Do not infer PIDs by port.
+                _processJob?.TryAssign(process, source);
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                return process;
             }
         }
         catch
         {
-            // Best effort PID discovery. Port readiness checks remain the source of truth.
+            EmergencyKill(process);
+            process.Dispose();
+            throw;
         }
-
-        return null;
     }
-    private static async Task WaitForPortAsync(int port, TimeSpan timeout, CancellationToken cancellationToken)
+
+    private static async Task WaitForPortAsync(int port, TimeSpan timeout, CancellationToken ct)
     {
-        var end = DateTime.UtcNow + timeout;
-
-        while (DateTime.UtcNow < end)
+        var timer = Stopwatch.StartNew();
+        while (timer.Elapsed < timeout)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (await IsPortOpenAsync(port, TimeSpan.FromMilliseconds(500)))
-                return;
-
-            await Task.Delay(500, cancellationToken);
+            ct.ThrowIfCancellationRequested();
+            if (await IsPortOpenAsync(port, TimeSpan.FromMilliseconds(500)).ConfigureAwait(false)) return;
+            await Task.Delay(500, ct).ConfigureAwait(false);
         }
-
         throw new TimeoutException($"等待 Windows-MCP 监听 127.0.0.1:{port} 超时。");
     }
 
     private static async Task<bool> IsPortOpenAsync(int port, TimeSpan timeout)
     {
+        using var cts = new CancellationTokenSource(timeout);
         try
         {
             using var client = new TcpClient();
-            using var cts = new CancellationTokenSource(timeout);
-            await client.ConnectAsync("127.0.0.1", port, cts.Token);
+            await client.ConnectAsync("127.0.0.1", port, cts.Token).ConfigureAwait(false);
             return true;
         }
-        catch
-        {
-            return false;
-        }
+        catch (SocketException) { return false; }
+        catch (OperationCanceledException) { return false; }
     }
 
-    private static async Task StopProcessAsync(Process? process, string name)
+    private static async Task StopProcessAsync(Process? process)
     {
-        if (process is null)
-            return;
-
+        if (process is null) return;
         try
         {
             if (!process.HasExited)
             {
                 process.Kill(entireProcessTree: true);
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                try { await process.WaitForExitAsync(cts.Token).ConfigureAwait(false); } catch { }
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
             }
         }
-        catch
-        {
-            // Best effort shutdown.
-        }
-        finally
-        {
-            process.Dispose();
-        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or OperationCanceledException) { }
+        finally { process.Dispose(); }
     }
 
-    private void SetState(RuntimeState state)
+    private void PublishState()
     {
-        State = state;
-        StateChanged?.Invoke(state);
+        StateChanged?.Invoke(State);
+        HealthChanged?.Invoke();
     }
 
-    /// <summary>
-    /// Synchronous emergency shutdown. This method never waits for child-process
-    /// exit and is safe to call from the WPF UI thread when graceful cleanup
-    /// exceeded its deadline.
-    /// </summary>
+    private void CancelLifetime()
+    {
+        try { Volatile.Read(ref _lifetimeCts)?.Cancel(); }
+        catch (ObjectDisposedException) { }
+    }
+
+    /// <summary>Terminal emergency cleanup. Call off the WPF dispatcher.</summary>
     public void ForceStop()
     {
-        try { _lifetimeCts?.Cancel(); } catch { }
-
-        // KILL_ON_JOB_CLOSE is the primary guarantee: closing the handle asks the
-        // Windows kernel to terminate every process in the owned process tree.
-        try { _processJob?.Dispose(); } catch { }
-        _processJob = null;
-
-        EmergencyKill(_tunnelProcess);
-        EmergencyKill(_mcpProcess);
-
-        // Best-effort listener cleanup for environments where assigning the
-        // launcher process to a Job Object was not permitted.
-        if (_ownsMcp && _ownedMcpPort is int port)
+        OwnedProcessJob? job;
+        Process? tunnel;
+        Process? mcp;
+        lock (_processGate)
         {
-            var listenerPid = FindListeningProcessId(port, timeoutMilliseconds: 350);
-            if (listenerPid is int pid && (_mcpListenerPid is null || pid == _mcpListenerPid))
-            {
-                try
-                {
-                    using var listener = Process.GetProcessById(pid);
-                    listener.Kill(entireProcessTree: true);
-                }
-                catch { }
-            }
+            _disposed = true;
+            _health.BeginStop();
+            job = Interlocked.Exchange(ref _processJob, null);
+            tunnel = Interlocked.Exchange(ref _tunnelProcess, null);
+            mcp = Interlocked.Exchange(ref _mcpProcess, null);
         }
-
-        try { _tunnelProcess?.Dispose(); } catch { }
-        try { _mcpProcess?.Dispose(); } catch { }
-        try { _lifetimeCts?.Dispose(); } catch { }
-
-        _tunnelProcess = null;
-        _mcpProcess = null;
-        _lifetimeCts = null;
-        _tunnelReadySignal = null;
-        _ownsMcp = false;
-        _ownedMcpPort = null;
-        _mcpListenerPid = null;
-        TunnelReady = false;
-        McpReady = false;
+        CancelLifetime();
+        try { job?.Dispose(); } catch { }
+        // No port-to-PID fallback: never terminate a process of unknown ownership.
+        EmergencyKill(tunnel);
+        EmergencyKill(mcp);
+        _health.MarkStopped();
     }
 
     public void Dispose() => ForceStop();
 
     private static void EmergencyKill(Process? process)
     {
-        if (process is null)
-            return;
-
-        try
-        {
-            if (!process.HasExited)
-                process.Kill(entireProcessTree: true);
-        }
-        catch { }
-    }}
+        if (process is null) return;
+        try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+        catch (InvalidOperationException) { }
+        catch (System.ComponentModel.Win32Exception) { }
+        finally { process.Dispose(); }
+    }
+}

@@ -12,6 +12,29 @@ The project follows Semantic Versioning where practical.
 - Expand automated tests for startup and failure-state handling.
 - Improve accessibility and localization.
 
+## [0.1.2]
+
+### Fixed
+
+- Transition unexpected child exits to Faulted instead of displaying a stale connected state.
+- Fence health and process observations by run generation; serialize lifecycle operations.
+- Clean up owned command processes on cancellation without killing unknown listeners by port.
+- Respect fixed tunnel-client versions using versioned installations and cache integrity receipts.
+- Stop silently falling back to an old tunnel-client release when latest lookup fails.
+- Bound the UI log buffer and tolerate log-file I/O failures.
+
+### Added
+
+- Passive local-port and loopback tunnel readiness monitoring with explicit unknown/degraded states.
+- Thirty regression cases and a Windows verification script used by CI and releases.
+- Draft-first release publication with downloaded-asset checksum verification.
+
+### Limitations
+
+- Real ChatGPT/Tunnel multi-session behavior remains a separate end-to-end validation task.
+- Readiness does not prove ChatGPT tool availability. No automatic tool-call replay is performed.
+- Plaintext portable credentials and cache-first latest selection remain unchanged policies.
+
 ## [0.1.1] - 2026-08-20
 
 ### Added
