@@ -40,7 +40,7 @@
 
 ## 快速开始
 
-1. 在 GitHub Releases 下载 `ChatGPT-Windows-MCP-win-x64.zip`。
+1. 在 GitHub Releases 选择下载：`ChatGPT-Windows-MCP-win-x64.zip` 为完整内置版；`ChatGPT-Windows-MCP-online-win-x64.zip` 为在线下载版，首次启动按需下载依赖。两种都包含 .NET，可直接运行启动器。
 2. 解压后运行 `ChatGPT-Windows-MCP.exe`。
 3. 点击 **创建链接**。
 4. 第一步点击 **打开 Tunnel 创建页面** 或 **复制链接**，创建后填入 `tunnel_...`。

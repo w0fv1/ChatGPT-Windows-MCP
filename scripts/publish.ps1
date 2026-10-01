@@ -1,11 +1,18 @@
+param(
+  [ValidateSet('Full', 'Online')][string]$PackageMode = 'Full',
+  [string]$OutputDirectory = ''
+)
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $PSScriptRoot
 $Project = Join-Path $Root "src\ChatGPTWindowsMcp\ChatGPTWindowsMcp.csproj"
-$Dist = Join-Path $Root "dist"
+$Dist = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $Root "dist" }
+$EmbedRuntime = $PackageMode -eq 'Full'
 
-& (Join-Path $PSScriptRoot "prepare-bundled-uv.ps1")
-& (Join-Path $PSScriptRoot "prepare-bundled-runtime.ps1")
+if ($EmbedRuntime) {
+  & (Join-Path $PSScriptRoot "prepare-bundled-uv.ps1")
+  & (Join-Path $PSScriptRoot "prepare-bundled-runtime.ps1")
+}
 
 New-Item -ItemType Directory -Path $Dist -Force | Out-Null
 
@@ -16,6 +23,7 @@ dotnet publish $Project `
   -o $Dist `
   /p:PublishSingleFile=true `
   /p:IncludeNativeLibrariesForSelfExtract=true `
+  /p:EmbedBundledRuntime=$EmbedRuntime `
   /p:DebugType=None `
   /p:DebugSymbols=false
 if ($LASTEXITCODE -ne 0) { throw "Publish failed." }

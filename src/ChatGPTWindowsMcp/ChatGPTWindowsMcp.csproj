@@ -9,7 +9,7 @@
     <AssemblyName>ChatGPT-Windows-MCP</AssemblyName>
     <RootNamespace>ChatGPTWindowsMcp</RootNamespace>
   </PropertyGroup>
-  <ItemGroup Condition="Exists('../../tools/bundled-uv/win-x64/manifest.json')">
+  <ItemGroup Condition="'$(EmbedBundledRuntime)' != 'False' and Exists('../../tools/bundled-uv/win-x64/manifest.json')">
     <EmbeddedResource Include="../../tools/bundled-uv/win-x64/uv.exe" LogicalName="BundledUv.uv.exe" />
     <EmbeddedResource Include="../../tools/bundled-uv/win-x64/uvx.exe" LogicalName="BundledUv.uvx.exe" />
     <EmbeddedResource Include="../../tools/bundled-uv/win-x64/LICENSE-MIT" LogicalName="BundledUv.LICENSE-MIT" />
@@ -17,11 +17,11 @@
     <EmbeddedResource Include="../../tools/bundled-uv/win-x64/manifest.json" LogicalName="BundledUv.manifest.json" />
   </ItemGroup>
   <Target Name="RequireBundledUv" BeforeTargets="PrepareForBuild"
-          Condition="'$(RuntimeIdentifier)' == 'win-x64' and '$(SelfContained)' == 'true'">
+          Condition="'$(EmbedBundledRuntime)' != 'False' and '$(RuntimeIdentifier)' == 'win-x64' and '$(SelfContained)' == 'true'">
     <Error Condition="!Exists('../../tools/bundled-uv/win-x64/manifest.json')" Text="Run scripts/prepare-bundled-uv.ps1 before publishing; portable releases require bundled uv." />
     <Error Condition="!Exists('../../tools/bundled-runtime/manifest.json')" Text="Run scripts/prepare-bundled-runtime.ps1 before publishing; portable releases require the complete runtime." />
   </Target>
-  <ItemGroup Condition="Exists('../../tools/bundled-runtime/manifest.json')">
+  <ItemGroup Condition="'$(EmbedBundledRuntime)' != 'False' and Exists('../../tools/bundled-runtime/manifest.json')">
     <EmbeddedResource Include="../../tools/bundled-runtime/manifest.json" LogicalName="BundledRuntime.manifest.json" />
     <EmbeddedResource Include="../../tools/bundled-runtime/runtime.zip" LogicalName="BundledRuntime.runtime.zip" />
   </ItemGroup>

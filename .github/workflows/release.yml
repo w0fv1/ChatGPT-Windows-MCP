@@ -85,8 +85,15 @@ jobs:
           Copy-Item .\docs\RUNTIME_FIX.md .\dist\RUNTIME_FIX.md -Force
           Set-Content .\dist\SOURCE_COMMIT.txt $env:RELEASE_COMMIT -Encoding utf8NoBOM
           Compress-Archive -Path .\dist\* -DestinationPath .\ChatGPT-Windows-MCP-win-x64.zip -Force
-          $hash = (Get-FileHash .\ChatGPT-Windows-MCP-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  ChatGPT-Windows-MCP-win-x64.zip" | Set-Content .\SHA256SUMS.txt -Encoding utf8NoBOM
+          $online = Join-Path $env:RUNNER_TEMP 'online-dist'
+          .\scripts\publish.ps1 -PackageMode Online -OutputDirectory $online
+          Copy-Item .\LICENSE $online -Force
+          Set-Content (Join-Path $online 'SOURCE_COMMIT.txt') $env:RELEASE_COMMIT -Encoding utf8NoBOM
+          Compress-Archive -Path "$online\*" -DestinationPath .\ChatGPT-Windows-MCP-online-win-x64.zip -Force
+          @('ChatGPT-Windows-MCP-win-x64.zip', 'ChatGPT-Windows-MCP-online-win-x64.zip') | ForEach-Object {
+            $hash = (Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $_"
+          } | Set-Content .\SHA256SUMS.txt -Encoding utf8NoBOM
 
       - name: Create draft and upload assets
         env:
@@ -97,7 +104,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           # create fails if a release already exists: never clobber published assets.
-          & gh release create $env:RELEASE_TAG .\ChatGPT-Windows-MCP-win-x64.zip .\SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_COMMIT --draft --title $env:RELEASE_TAG --notes-file $env:RELEASE_NOTES
+          & gh release create $env:RELEASE_TAG .\ChatGPT-Windows-MCP-win-x64.zip .\ChatGPT-Windows-MCP-online-win-x64.zip .\SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --target $env:RELEASE_COMMIT --draft --title $env:RELEASE_TAG --notes-file $env:RELEASE_NOTES
           if ($LASTEXITCODE -ne 0) { throw 'Draft release creation or asset upload failed; no publication attempted' }
 
       - name: Verify uploaded bytes and publish
@@ -108,9 +115,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $verify = Join-Path $env:RUNNER_TEMP ('release-verify-' + [guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $verify | Out-Null
-          & gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir $verify --pattern 'ChatGPT-Windows-MCP-win-x64.zip' --pattern 'SHA256SUMS.txt'
+          & gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir $verify --pattern 'ChatGPT-Windows-MCP-win-x64.zip' --pattern 'ChatGPT-Windows-MCP-online-win-x64.zip' --pattern 'SHA256SUMS.txt'
           if ($LASTEXITCODE -ne 0) { throw 'Cannot download draft assets for verification; release remains draft' }
-          foreach ($name in @('ChatGPT-Windows-MCP-win-x64.zip', 'SHA256SUMS.txt')) {
+          foreach ($name in @('ChatGPT-Windows-MCP-win-x64.zip', 'ChatGPT-Windows-MCP-online-win-x64.zip', 'SHA256SUMS.txt')) {
             $local = (Get-FileHash (Join-Path $PWD $name) -Algorithm SHA256).Hash
             $remote = (Get-FileHash (Join-Path $verify $name) -Algorithm SHA256).Hash
             if ($local -ne $remote) { throw "Asset integrity mismatch: $name; release remains draft" }

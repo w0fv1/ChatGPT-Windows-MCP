@@ -56,6 +56,8 @@ ChatGPT connector can operate the local Windows machine
 
 ## Quick start
 
+Two portable packages are available: `ChatGPT-Windows-MCP-win-x64.zip` includes all runtime dependencies; `ChatGPT-Windows-MCP-online-win-x64.zip` downloads dependencies when needed on first startup. Both include .NET. Build either using `scripts/publish.ps1 -PackageMode Full` or `-PackageMode Online`, optionally with `-OutputDirectory`.
+
 1. Download the latest `ChatGPT-Windows-MCP-win-x64.zip` from [Releases](https://github.com/w0fv1/ChatGPT-Windows-MCP/releases).
 2. Extract it and run `ChatGPT-Windows-MCP.exe`.
 3. Click **创建链接**.

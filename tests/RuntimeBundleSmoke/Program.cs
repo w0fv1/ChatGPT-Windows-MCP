@@ -2,9 +2,16 @@ using System.IO;
 using ChatGPTWindowsMcp;
 class BundleSmoke
 {
-    static void Main()
+    static void Main(string[] args)
     {
             var assembly = typeof(MainWindow).Assembly;
+            if (args.Contains("--online"))
+            {
+                if (assembly.GetManifestResourceNames().Any(name => name.StartsWith("BundledRuntime.") || name.StartsWith("BundledUv.")))
+                    throw new Exception("Online package contains bundled dependencies");
+                Console.WriteLine("Online build contains no embedded uv, Python, MCP or Tunnel payloads.");
+                return;
+            }
             var type = assembly.GetType("ChatGPTWindowsMcp.BundledRuntime")!;
             var destination = Path.Combine(AppContext.BaseDirectory, "full-runtime-smoke-" + Guid.NewGuid().ToString("N"));
             var updates = new List<int>();
