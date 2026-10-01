@@ -14,5 +14,10 @@
     <Compile Include="../../src/ChatGPTWindowsMcp/CommandRunner.cs" Link="Production/CommandRunner.cs" />
     <Compile Include="../../src/ChatGPTWindowsMcp/AppPaths.cs" Link="Production/AppPaths.cs" />
     <Compile Include="../../src/ChatGPTWindowsMcp/LogSink.cs" Link="Production/LogSink.cs" />
+    <Compile Include="../../src/ChatGPTWindowsMcp/UvInstallation.cs" Link="Production/UvInstallation.cs" />
+    <Compile Include="../../src/ChatGPTWindowsMcp/PluginCreationPrompt.cs" Link="Production/PluginCreationPrompt.cs" />
+    <Compile Include="../../src/ChatGPTWindowsMcp/McpConnectionProbe.cs" Link="Production/McpConnectionProbe.cs" />
+    <Compile Include="../../src/ChatGPTWindowsMcp/BundledUv.cs" Link="Production/BundledUv.cs" />
+    <Compile Include="../../src/ChatGPTWindowsMcp/BundledRuntime.cs" Link="Production/BundledRuntime.cs" />
   </ItemGroup>
 </Project>

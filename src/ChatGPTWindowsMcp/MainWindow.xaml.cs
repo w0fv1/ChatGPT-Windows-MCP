@@ -10,12 +10,20 @@ public partial class MainWindow : Window
 {
     private const string TunnelUrl = "https://platform.openai.com/settings/organization/tunnels";
     private const string RuntimeKeyUrl = "https://platform.openai.com/settings/organization/api-keys";
-    private const string ChatGptConnectorsUrl = "https://chatgpt.com/#settings/Connectors";
+    private const string ChatGptPluginsUrl = "https://chatgpt.com/plugins";
+    private const string ChatGptHomeUrl = "https://chatgpt.com/";
 
-    private readonly LogSink _logSink = new();
+    private readonly LogSink _logSink = App.Log;
     private readonly RuntimeManager _runtime;
     private AppConfig _config;
     private int _wizardStepIndex;
+    private string _pluginCreationPrompt = "";
+    private bool _pluginSetupOnly;
+    private Task<bool>? _wizardStartupTask;
+    private bool _registrationInProgress;
+    private bool _isPreparingRuntime;
+    private int? _startupPercent;
+    private int _startupSequence;
     private string? _operationMessage;
     private bool _syncingApiKey;
     private bool _shutdownInProgress;
@@ -33,6 +41,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            _logSink.Error("config-load", ex);
             MessageBox.Show($"读取 config.json 失败：{ex.Message}", "配置错误", MessageBoxButton.OK, MessageBoxImage.Error);
             _config = new AppConfig();
         }
@@ -41,6 +50,8 @@ public partial class MainWindow : Window
         _logSink.LineReceived += OnLogLine;
         _runtime.StateChanged += OnStateChanged;
         _runtime.HealthChanged += OnHealthChanged;
+        _logSink.ProtectSecret(_config.RuntimeApiKey);
+        _logSink.Write("ui", "主窗口已初始化。");
 
         LoadAdvancedConfig();
         RenderMainState();
@@ -59,6 +70,7 @@ public partial class MainWindow : Window
 
         _shutdownInProgress = true;
         _windowLifetime.Cancel();
+        _logSink.Write("shutdown", "用户关闭窗口，取消正在执行的任务并停止本机服务。");
         IsEnabled = false;
         _operationMessage = "正在退出并清理本地资源…";
         RenderMainState();
@@ -74,6 +86,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            _logSink.Error("shutdown", ex);
             _logSink.Write($"退出清理时出现警告：{ex.Message}");
             _ = Task.Run(_runtime.ForceStop);
         }
@@ -102,6 +115,8 @@ public partial class MainWindow : Window
                 Dispatcher.BeginInvoke(RenderMainState);
             return;
         }
+
+        UpdatePluginPrompt();
 
         if (_operationMessage is not null)
         {
@@ -217,6 +232,7 @@ public partial class MainWindow : Window
             }
             catch (Exception ex)
             {
+                _logSink.Error("stop-ui", ex);
                 MessageBox.Show(ex.Message, "停止失败", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally
@@ -235,35 +251,81 @@ public partial class MainWindow : Window
         if (!SaveAdvancedConfig(showSuccess: false))
             return;
 
-        LogTextBox.Clear();
+        await StartConfiguredRuntimeAsync();
+    }
+
+    private async Task<bool> StartConfiguredRuntimeAsync()
+    {
+        _isPreparingRuntime = true;
+        _startupPercent = 0;
+        var sequence = ++_startupSequence;
+        var progress = new Progress<(int Percent, string Detail)>(value => ReportStartupProgress(sequence, value));
+        _logSink.ProtectSecret(_config.RuntimeApiKey);
+        _logSink.Write("startup", $"开始启动；Tunnel={_config.TunnelId}；MCP 端口={_config.McpPort}；Python={_config.PythonVersion}；包={_config.WindowsMcpSpec}。");
         SetOperation("正在准备运行环境…");
 
         try
         {
-            await _runtime.InstallDependenciesAsync(_config, _windowLifetime.Token);
-            SetOperation("正在连接 OpenAI Tunnel…");
-            await _runtime.StartAsync(_config, _windowLifetime.Token);
-
-            if (_config.AutoOpenChatGptConnectors)
-                OpenUrl(ChatGptConnectorsUrl);
+            await _runtime.InstallDependenciesAsync(_config, _windowLifetime.Token, progress);
+            await _runtime.StartAsync(_config, _windowLifetime.Token, progress);
+            _startupPercent = 100;
+            return true;
         }
-        catch (OperationCanceledException) when (_windowLifetime.IsCancellationRequested) { }
+        catch (OperationCanceledException) when (_windowLifetime.IsCancellationRequested)
+        {
+            _logSink.Write("startup", "启动已因窗口关闭而取消。");
+            return false;
+        }
         catch (Exception ex)
         {
-            if (_shutdownInProgress) return;
-            _logSink.Write($"启动失败：{ex.Message}");
+            if (_shutdownInProgress) return false;
+            _logSink.Error("startup-ui", ex);
             AdvancedExpander.IsExpanded = true;
             MessageBox.Show(ex.Message, "连接失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            return false;
         }
         finally
         {
+            _isPreparingRuntime = false;
             SetOperation(null);
         }
+    }
+
+    private Task<bool> EnsureWizardRuntimeAsync()
+    {
+        if (_shutdownInProgress || !IsConfigured()) return Task.FromResult(false);
+        if (_wizardStartupTask is { IsCompleted: false }) return _wizardStartupTask;
+        if (_runtime.State == RuntimeState.Running && _runtime.ActiveTunnelId == _config.TunnelId.Trim())
+            return Task.FromResult(true);
+        if (_operationMessage is not null) return Task.FromResult(false);
+        _wizardStartupTask = StartConfiguredRuntimeAsync();
+        return _wizardStartupTask;
+    }
+
+    private void ReportStartupProgress(int sequence, (int Percent, string Detail) value)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            if (!Dispatcher.HasShutdownStarted) Dispatcher.BeginInvoke(() => ReportStartupProgress(sequence, value));
+            return;
+        }
+        if (!_isPreparingRuntime || _shutdownInProgress || sequence != _startupSequence) return;
+        if (value.Percent < (_startupPercent ?? 0)) return;
+        _startupPercent = Math.Max(_startupPercent ?? 0, Math.Clamp(value.Percent, 0, 100));
+        SetOperation(value.Detail);
+    }
+
+    private void RenderStartupProgress()
+    {
+        var visibility = _startupPercent.HasValue ? Visibility.Visible : Visibility.Collapsed;
+        MainStartupPercentText.Visibility = PluginStartupPercentText.Visibility = visibility;
+        MainStartupPercentText.Text = PluginStartupPercentText.Text = $"{_startupPercent ?? 0}%";
     }
 
     private void SetOperation(string? message)
     {
         _operationMessage = message;
+        if (message is not null) _logSink.Write("operation", message);
         RenderMainState();
     }
 
@@ -276,6 +338,7 @@ public partial class MainWindow : Window
             try { await _runtime.StopAsync(); }
             catch (Exception ex)
             {
+                _logSink.Error("reconfigure-stop", ex);
                 if (!_shutdownInProgress)
                     MessageBox.Show(ex.Message, "停止失败", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
@@ -284,21 +347,131 @@ public partial class MainWindow : Window
         }
         if (!_shutdownInProgress && !_shutdownComplete) ShowWizard(startFromBeginning: true);
     }
-    private void OpenChatGptButton_Click(object sender, RoutedEventArgs e) => OpenUrl(ChatGptConnectorsUrl);
+    private void OpenChatGptButton_Click(object sender, RoutedEventArgs e) => OpenUrl(ChatGptHomeUrl);
+
+    private void CopyChatGptLinkButton_Click(object sender, RoutedEventArgs e) =>
+        CopyText(ChatGptHomeUrl, PluginPromptCopyFeedbackText, "✓ ChatGPT 链接已复制。");
+
+    private void CopyPluginTunnelIdButton_Click(object sender, RoutedEventArgs e) =>
+        CopyText(_runtime.ActiveTunnelId ?? _config.TunnelId.Trim(), PluginPromptCopyFeedbackText, "✓ Tunnel ID 已复制，请在 ChatGPT 选择 Tunnel 并使用此 ID。");
+
+    private async void RegisterTunnelButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_operationMessage is not null || _shutdownInProgress || _registrationInProgress) return;
+        _registrationInProgress = true;
+        RegisterTunnelButton.IsEnabled = false;
+        RegisterTunnelButton.Content = "正在检查连接…";
+        try
+        {
+            if (!await EnsureWizardRuntimeAsync()) return;
+            var summary = await _runtime.CheckRegistrationAsync(_config, _windowLifetime.Token);
+            PluginPromptCopyFeedbackText.Text = summary + " 在插件页点击“添加 → 创建 MCP 应用”，连接选择“隧道”，粘贴 Tunnel ID，身份验证选择“无需身份验证”。";
+            PluginPromptCopyFeedbackText.Foreground = ResourceBrush("SuccessBrush", Brushes.ForestGreen);
+            OpenUrl(ChatGptPluginsUrl);
+        }
+        catch (OperationCanceledException) when (_windowLifetime.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            _logSink.Error("registration-ui", ex);
+            PluginPromptCopyFeedbackText.Text = ex.Message;
+            PluginPromptCopyFeedbackText.Foreground = ResourceBrush("DangerBrush", Brushes.Firebrick);
+        }
+        finally
+        {
+            _registrationInProgress = false;
+            RegisterTunnelButton.Content = "创建 MCP 应用";
+            UpdatePluginPrompt();
+        }
+    }
+
+    private async void PluginSetupButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_operationMessage is not null || _shutdownInProgress || !IsConfigured()) return;
+        _pluginSetupOnly = true;
+        _wizardStepIndex = 3;
+        PluginNameTextBox.Text = _config.PluginDisplayName;
+        PluginConnectionLinkTextBox.Text = _config.PluginConnectionAppId;
+        RenderWizardStep();
+        MainScrollViewer.Visibility = Visibility.Collapsed;
+        WizardRoot.Visibility = Visibility.Visible;
+        await EnsureWizardRuntimeAsync();
+    }
+
+    private void PluginSettings_TextChanged(object sender, TextChangedEventArgs e) => UpdatePluginPrompt();
+
+    private void UpdatePluginPrompt()
+    {
+        if (_config is null || PluginNameTextBox is null || CopyPluginPromptButton is null ||
+            PluginNameValidationText is null || PluginPromptCopyFeedbackText is null || PluginFinishButton is null ||
+            PluginConnectionLinkTextBox is null || PluginConnectionValidationText is null || PluginSetupButton is null) return;
+        var validName = PluginCreationPrompt.IsNameValid(PluginNameTextBox.Text);
+        var emptyConnection = string.IsNullOrWhiteSpace(PluginConnectionLinkTextBox.Text);
+        var validConnection = PluginCreationPrompt.TryGetConnectionId(PluginConnectionLinkTextBox.Text, out var appId);
+        PluginNameValidationText.Text = validName ? "" : "请填写插件名字（最多 80 个字符）。";
+        PluginNameValidationText.Visibility = validName ? Visibility.Collapsed : Visibility.Visible;
+        PluginNameValidationText.Foreground = ResourceBrush("DangerBrush", Brushes.Firebrick);
+        PluginConnectionValidationText.Text = emptyConnection ? "可留空，AI 会尝试查找或创建连接；缺少连接能力时会提示你完成手动步骤。"
+            : validConnection ? "✓ 连接 ID 已识别；请确认此连接使用复制的 Tunnel ID。"
+            : "请粘贴包含 plugin_asdk_app... 的 MCP 应用详情链接（可选），或该连接 ID。";
+        PluginConnectionValidationText.Foreground = ResourceBrush(!emptyConnection && !validConnection ? "DangerBrush" : "TextSecondaryBrush", Brushes.DimGray);
+        var prompt = validName && (emptyConnection || validConnection) && IsTunnelIdValid(_config.TunnelId)
+            ? PluginCreationPrompt.Build(PluginNameTextBox.Text, _config.TunnelId, appId) : "";
+        if (_pluginCreationPrompt != prompt)
+        {
+            _pluginCreationPrompt = prompt;
+            PluginPromptCopyFeedbackText.Text = "";
+        }
+        CopyPluginPromptButton.IsEnabled = prompt.Length > 0 && _operationMessage is null && !_registrationInProgress && !_shutdownInProgress;
+        PluginFinishButton.IsEnabled = validName && (emptyConnection || validConnection) && _operationMessage is null && !_registrationInProgress && !_shutdownInProgress;
+        PluginSetupButton.Visibility = IsConfigured() ? Visibility.Visible : Visibility.Collapsed;
+        PluginSetupButton.IsEnabled = _operationMessage is null && !_shutdownInProgress;
+        RenderStartupProgress();
+        RegisterTunnelButton.IsEnabled = _operationMessage is null && !_registrationInProgress && !_shutdownInProgress;
+        PluginBackButton.IsEnabled = _operationMessage is null && !_registrationInProgress && !_shutdownInProgress;
+        PluginServiceStatusText.Text = _operationMessage ?? (_runtime.State == RuntimeState.Running
+            ? "本机服务和 Tunnel 已就绪，可以创建 MCP 应用。"
+            : _runtime.State == RuntimeState.Faulted ? _runtime.Health.Detail : "正在自动准备本机服务和 Tunnel，完成后即可创建 MCP 应用。");
+        PluginTunnelIdText.Text = $"{(_runtime.ActiveTunnelId is null ? "配置" : "当前运行")}的 Tunnel：{_runtime.ActiveTunnelId ?? _config.TunnelId.Trim()}";
+    }
+
+    private bool SavePluginSettings()
+    {
+        UpdatePluginPrompt();
+        if (!PluginCreationPrompt.IsNameValid(PluginNameTextBox.Text)) return false;
+        var input = PluginConnectionLinkTextBox.Text;
+        if (!string.IsNullOrWhiteSpace(input) && !PluginCreationPrompt.TryGetConnectionId(input, out _)) return false;
+        _config.PluginDisplayName = PluginNameTextBox.Text.Trim();
+        _config.PluginConnectionAppId = PluginCreationPrompt.TryGetConnectionId(input, out var appId) ? appId : "";
+        return SaveConfig();
+    }
+
+    private async void CopyPluginPromptButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_operationMessage is not null || _registrationInProgress || _shutdownInProgress) return;
+        if (!SavePluginSettings() || _pluginCreationPrompt.Length == 0) return;
+        if (!await EnsureWizardRuntimeAsync()) return;
+        CopyText(_pluginCreationPrompt, PluginPromptCopyFeedbackText, "✓ 提示词已复制，可发送给 @Plugin Creator。");
+    }
 
     private void ShowWizard(bool startFromBeginning)
     {
+        _pluginSetupOnly = false;
         _wizardStepIndex = startFromBeginning
             ? 0
-            : IsTunnelIdValid(_config.TunnelId) && string.IsNullOrWhiteSpace(_config.RuntimeApiKey) ? 1 : 0;
+            : IsConfigured() ? 2 : IsTunnelIdValid(_config.TunnelId) ? 1 : 0;
 
         TunnelIdTextBox.Text = _config.TunnelId;
         SetApiKeyControls(_config.RuntimeApiKey);
         WizardProxyTextBox.Text = _config.ControlPlaneHttpProxy;
         WizardAutoDetectProxyCheckBox.IsChecked = _config.AutoDetectSystemProxy;
+        PluginNameTextBox.Text = _config.PluginDisplayName;
+        PluginConnectionLinkTextBox.Text = _config.PluginConnectionAppId;
         RenderWizardStep();
         MainScrollViewer.Visibility = Visibility.Collapsed;
         WizardRoot.Visibility = Visibility.Visible;
+        TunnelLinkFeedbackText.Text = "";
+        ApiKeyLinkFeedbackText.Text = "";
+        _logSink.Write("wizard", $"进入配置步骤 {_wizardStepIndex + 1}。");
     }
 
     private void ShowMainPage()
@@ -315,10 +488,13 @@ public partial class MainWindow : Window
         var tunnelStep = _wizardStepIndex == 0;
         var apiStep = _wizardStepIndex == 1;
         var proxyStep = _wizardStepIndex == 2;
+        var pluginStep = _wizardStepIndex == 3;
         TunnelStepPanel.Visibility = tunnelStep ? Visibility.Visible : Visibility.Collapsed;
         ApiStepPanel.Visibility = apiStep ? Visibility.Visible : Visibility.Collapsed;
         ProxyStepPanel.Visibility = proxyStep ? Visibility.Visible : Visibility.Collapsed;
-        WizardStepCaption.Text = $"步骤 {_wizardStepIndex + 1} / 3";
+        PluginStepPanel.Visibility = pluginStep ? Visibility.Visible : Visibility.Collapsed;
+        PluginBackButton.Visibility = _pluginSetupOnly ? Visibility.Collapsed : Visibility.Visible;
+        WizardStepCaption.Text = $"步骤 {_wizardStepIndex + 1} / 4";
 
         TunnelStepPill.Foreground = tunnelStep
             ? ResourceBrush("AccentBrush", Brushes.RoyalBlue)
@@ -326,15 +502,19 @@ public partial class MainWindow : Window
         TunnelStepPill.Text = tunnelStep ? "1  Tunnel ID" : "✓  Tunnel ID";
         ApiStepPill.Foreground = apiStep
             ? ResourceBrush("AccentBrush", Brushes.RoyalBlue)
-            : proxyStep ? ResourceBrush("SuccessBrush", Brushes.ForestGreen) : ResourceBrush("TextSecondaryBrush", Brushes.DimGray);
-        ApiStepPill.Text = proxyStep ? "✓  API Key" : "2  API Key";
-        ProxyStepPill.Foreground = proxyStep
+            : _wizardStepIndex > 1 ? ResourceBrush("SuccessBrush", Brushes.ForestGreen) : ResourceBrush("TextSecondaryBrush", Brushes.DimGray);
+        ApiStepPill.Text = _wizardStepIndex > 1 ? "✓  API Key" : "2  API Key";
+        ProxyStepPill.Foreground = proxyStep ? ResourceBrush("AccentBrush", Brushes.RoyalBlue)
+            : pluginStep ? ResourceBrush("SuccessBrush", Brushes.ForestGreen) : ResourceBrush("TextSecondaryBrush", Brushes.DimGray);
+        ProxyStepPill.Text = pluginStep ? "✓  网络代理" : "3  网络代理";
+        PluginStepPill.Foreground = pluginStep
             ? ResourceBrush("AccentBrush", Brushes.RoyalBlue)
             : ResourceBrush("TextSecondaryBrush", Brushes.DimGray);
 
         UpdateTunnelValidation();
         UpdateApiValidation();
         UpdateWizardProxyValidation();
+        UpdatePluginPrompt();
 
         Dispatcher.BeginInvoke(() =>
         {
@@ -352,16 +532,46 @@ public partial class MainWindow : Window
             {
                 ApiKeyPasswordBox.Focus();
             }
-            else
+            else if (proxyStep)
             {
                 WizardProxyTextBox.Focus();
                 WizardProxyTextBox.CaretIndex = WizardProxyTextBox.Text.Length;
+            }
+            else
+            {
+                PluginNameTextBox.Focus();
             }
         });
     }
 
     private void WizardOpenTunnel_Click(object sender, RoutedEventArgs e) => OpenUrl(TunnelUrl);
     private void WizardOpenApiKey_Click(object sender, RoutedEventArgs e) => OpenUrl(RuntimeKeyUrl);
+
+    private void WizardCopyTunnel_Click(object sender, RoutedEventArgs e) =>
+        CopyCreationLink(TunnelUrl, TunnelLinkFeedbackText);
+
+    private void WizardCopyApiKey_Click(object sender, RoutedEventArgs e) =>
+        CopyCreationLink(RuntimeKeyUrl, ApiKeyLinkFeedbackText);
+
+    private void CopyCreationLink(string url, TextBlock feedback)
+        => CopyText(url, feedback, "✓ 链接已复制，可粘贴到浏览器中打开。");
+
+    private void CopyText(string text, TextBlock feedback, string successMessage)
+    {
+        try
+        {
+            Clipboard.SetText(text);
+            feedback.Text = successMessage;
+            feedback.Foreground = ResourceBrush("SuccessBrush", Brushes.ForestGreen);
+            _logSink.Write("clipboard", "复制调用成功。");
+        }
+        catch (Exception ex)
+        {
+            _logSink.Error("clipboard", ex);
+            feedback.Text = "未能确认复制结果，请尝试粘贴或重试。";
+            feedback.Foreground = ResourceBrush("DangerBrush", Brushes.Firebrick);
+        }
+    }
 
     private void TunnelIdTextBox_TextChanged(object sender, TextChangedEventArgs e) => UpdateTunnelValidation();
 
@@ -396,8 +606,8 @@ public partial class MainWindow : Window
         if (!IsTunnelIdValid(tunnelId))
             return;
 
-        _config.TunnelId = tunnelId;
-        SaveConfig();
+        SetTunnelId(tunnelId);
+        if (!SaveConfig()) return;
         _wizardStepIndex = 1;
         RenderWizardStep();
     }
@@ -411,12 +621,13 @@ public partial class MainWindow : Window
 
     private void WizardCancel_Click(object sender, RoutedEventArgs e)
     {
+        if (_operationMessage is not null || _registrationInProgress || _shutdownInProgress) return;
         if (_wizardStepIndex == 0)
         {
             var tunnelId = TunnelIdTextBox.Text.Trim();
             if (IsTunnelIdValid(tunnelId))
             {
-                _config.TunnelId = tunnelId;
+                SetTunnelId(tunnelId);
                 SaveConfig();
             }
         }
@@ -424,9 +635,13 @@ public partial class MainWindow : Window
         {
             SaveCurrentApiKeyIfPresent();
         }
-        else
+        else if (_wizardStepIndex == 2)
         {
             SaveWizardProxyIfValid();
+        }
+        else
+        {
+            SavePluginSettings();
         }
 
         ShowMainPage();
@@ -528,15 +743,46 @@ public partial class MainWindow : Window
             return;
 
         _config.RuntimeApiKey = apiKey;
-        SaveConfig();
+        if (!SaveConfig()) return;
         _wizardStepIndex = 2;
         RenderWizardStep();
+        _logSink.Write("wizard", "进入第 3 步：设置网络代理。");
     }
 
     private void ProxyBackButton_Click(object sender, RoutedEventArgs e)
     {
-        SaveWizardProxyIfValid();
+        if (!SaveWizardProxyIfValid()) return;
         _wizardStepIndex = 1;
+        RenderWizardStep();
+    }
+
+    private async void ProxyNextButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_operationMessage is not null || _shutdownInProgress) return;
+        if (!SaveWizardProxyIfValid()) return;
+        _wizardStepIndex = 3;
+        RenderWizardStep();
+        _logSink.Write("wizard", "进入第 4 步：填写插件名字并复制创建提示词。");
+        await EnsureWizardRuntimeAsync();
+    }
+
+    private async void PluginBackButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_operationMessage is not null || _registrationInProgress || _shutdownInProgress) return;
+        if (_runtime.State != RuntimeState.Stopped)
+        {
+            SetOperation("正在停止服务，以便修改代理…");
+            try { await _runtime.StopAsync(); }
+            catch (Exception ex)
+            {
+                _logSink.Error("wizard-stop", ex);
+                if (!_shutdownInProgress) MessageBox.Show(ex.Message, "停止失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            finally { SetOperation(null); }
+        }
+        if (_shutdownInProgress) return;
+        _wizardStepIndex = 2;
         RenderWizardStep();
     }
 
@@ -544,7 +790,7 @@ public partial class MainWindow : Window
 
     private void UpdateWizardProxyValidation()
     {
-        if (WizardProxyValidationText is null || ProxyFinishButton is null)
+        if (WizardProxyValidationText is null || ProxyNextButton is null)
             return;
 
         var proxy = WizardProxyTextBox.Text.Trim();
@@ -552,28 +798,55 @@ public partial class MainWindow : Window
         {
             WizardProxyValidationText.Text = "可留空。示例：http://127.0.0.1:7890";
             WizardProxyValidationText.Foreground = ResourceBrush("TextSecondaryBrush", Brushes.DimGray);
-            ProxyFinishButton.IsEnabled = true;
+            ProxyNextButton.IsEnabled = true;
         }
         else if (ProxyResolver.TryNormalizeProxyUrl(proxy, out _))
         {
             WizardProxyValidationText.Text = "✓ 代理地址格式正确";
             WizardProxyValidationText.Foreground = ResourceBrush("SuccessBrush", Brushes.ForestGreen);
-            ProxyFinishButton.IsEnabled = true;
+            ProxyNextButton.IsEnabled = true;
         }
         else
         {
             WizardProxyValidationText.Text = "代理地址必须以 http:// 或 https:// 开头。";
             WizardProxyValidationText.Foreground = ResourceBrush("DangerBrush", Brushes.Firebrick);
-            ProxyFinishButton.IsEnabled = false;
+            ProxyNextButton.IsEnabled = false;
         }
     }
 
-    private void ProxyFinishButton_Click(object sender, RoutedEventArgs e)
+    private async void PluginFinishButton_Click(object sender, RoutedEventArgs e)
     {
-        if (!SaveWizardProxyIfValid())
+        if (_operationMessage is not null || _registrationInProgress || _shutdownInProgress) return;
+        if (!SavePluginSettings())
             return;
-
-        ShowMainPage();
+        _registrationInProgress = true;
+        PluginFinishButton.Content = "正在检查…";
+        UpdatePluginPrompt();
+        try
+        {
+            var errors = _config.Validate();
+            if (errors.Count > 0) throw new InvalidOperationException(string.Join(Environment.NewLine, errors));
+            if (!await EnsureWizardRuntimeAsync())
+                throw new InvalidOperationException("本机服务尚未启动成功，配置还未完成。请检查启动错误后再次点击“完成配置”。");
+            SetOperation("正在确认 MCP 工具和 Tunnel 连接就绪…");
+            var summary = await _runtime.CheckRegistrationAsync(_config, _windowLifetime.Token);
+            _windowLifetime.Token.ThrowIfCancellationRequested();
+            _logSink.Write("wizard", "完成配置检查通过；" + summary + " ChatGPT 端应用创建状态需在 ChatGPT 中确认。");
+            ShowMainPage();
+        }
+        catch (OperationCanceledException) when (_windowLifetime.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            _logSink.Error("wizard-finish", ex);
+            PluginPromptCopyFeedbackText.Text = "配置未完成：" + ex.Message;
+            PluginPromptCopyFeedbackText.Foreground = ResourceBrush("DangerBrush", Brushes.Firebrick);
+        }
+        finally
+        {
+            _registrationInProgress = false;
+            PluginFinishButton.Content = "完成配置";
+            SetOperation(null);
+        }
     }
 
     private bool SaveWizardProxyIfValid()
@@ -588,8 +861,7 @@ public partial class MainWindow : Window
 
         _config.ControlPlaneHttpProxy = string.IsNullOrWhiteSpace(proxy) ? "" : normalized;
         _config.AutoDetectSystemProxy = WizardAutoDetectProxyCheckBox.IsChecked == true;
-        SaveConfig();
-        return true;
+        return SaveConfig();
     }
 
     private void SaveCurrentApiKeyIfPresent()
@@ -602,15 +874,20 @@ public partial class MainWindow : Window
         SaveConfig();
     }
 
-    private void SaveConfig()
+    private bool SaveConfig()
     {
         try
         {
+            _logSink.ProtectSecret(_config.RuntimeApiKey);
             _config.Save();
+            _logSink.Write("config", "配置已保存（不记录 API Key 内容）。");
+            return true;
         }
         catch (Exception ex)
         {
+            _logSink.Error("config-save", ex);
             MessageBox.Show($"保存配置失败：{ex.Message}", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            return false;
         }
     }
 
@@ -625,7 +902,6 @@ public partial class MainWindow : Window
         ProxyTextBox.Text = _config.ControlPlaneHttpProxy;
         AutoDetectProxyCheckBox.IsChecked = _config.AutoDetectSystemProxy;
         ReuseMcpCheckBox.IsChecked = _config.ReuseExistingMcp;
-        AutoOpenCheckBox.IsChecked = _config.AutoOpenChatGptConnectors;
         AutoDownloadTunnelCheckBox.IsChecked = _config.AutoDownloadTunnelClient;
     }
 
@@ -666,7 +942,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        _config.TunnelId = tunnelId;
+        SetTunnelId(tunnelId);
         _config.RuntimeApiKey = apiKey;
         _config.McpPort = port;
         _config.ProfileName = string.IsNullOrWhiteSpace(ProfileTextBox.Text) ? "windows-mcp" : ProfileTextBox.Text.Trim();
@@ -677,21 +953,35 @@ public partial class MainWindow : Window
             : ProxyResolver.TryNormalizeProxyUrl(proxy, out var normalizedProxy) ? normalizedProxy : proxy;
         _config.AutoDetectSystemProxy = AutoDetectProxyCheckBox.IsChecked == true;
         _config.ReuseExistingMcp = ReuseMcpCheckBox.IsChecked == true;
-        _config.AutoOpenChatGptConnectors = AutoOpenCheckBox.IsChecked == true;
         _config.AutoDownloadTunnelClient = AutoDownloadTunnelCheckBox.IsChecked == true;
 
         try
         {
+            _logSink.ProtectSecret(_config.RuntimeApiKey);
             _config.Save();
+            _logSink.Write("config", "高级选项已保存。");
+            RenderMainState();
             if (showSuccess)
                 MessageBox.Show("高级选项已保存。", "保存成功", MessageBoxButton.OK, MessageBoxImage.Information);
             return true;
         }
         catch (Exception ex)
         {
+            _logSink.Error("config-advanced-save", ex);
             MessageBox.Show($"保存 config.json 失败：{ex.Message}", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
             return false;
         }
+    }
+
+    private void SetTunnelId(string tunnelId)
+    {
+        if (!string.Equals(_config.TunnelId, tunnelId, StringComparison.Ordinal))
+        {
+            _config.PluginConnectionAppId = "";
+            PluginConnectionLinkTextBox.Text = "";
+        }
+        _config.TunnelId = tunnelId;
+        UpdatePluginPrompt();
     }
 
     private void SetAdvancedEditorsEnabled(bool enabled)
@@ -705,7 +995,6 @@ public partial class MainWindow : Window
         ProxyTextBox.IsEnabled = enabled;
         AutoDetectProxyCheckBox.IsEnabled = enabled;
         ReuseMcpCheckBox.IsEnabled = enabled;
-        AutoOpenCheckBox.IsEnabled = enabled;
         AutoDownloadTunnelCheckBox.IsEnabled = enabled;
     }
 
@@ -716,8 +1005,18 @@ public partial class MainWindow : Window
         if (_operationMessage is not null || _shutdownInProgress) return;
         if (_runtime.State == RuntimeState.Running)
         {
-            MessageBox.Show(_runtime.Health.Detail + "\n请先停止服务，再执行 doctor 诊断。",
-                "运行中健康状态", MessageBoxButton.OK, MessageBoxImage.Information);
+            try
+            {
+                var summary = await _runtime.CheckRegistrationAsync(_config, _windowLifetime.Token);
+                MessageBox.Show(summary + "\n若 ChatGPT 仍创建失败，请确认使用此 ID，并核对工作区关联及 Tunnels Read + Use 权限。",
+                    "连接诊断", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (OperationCanceledException) when (_windowLifetime.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                _logSink.Error("doctor-ui", ex);
+                if (!_shutdownInProgress) MessageBox.Show(ex.Message, "连接诊断", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
             return;
         }
         if (!IsConfigured())
@@ -730,7 +1029,7 @@ public partial class MainWindow : Window
         if (!SaveAdvancedConfig(showSuccess: false))
             return;
 
-        LogTextBox.Clear();
+        _logSink.Write("doctor", "用户开始连接诊断。");
         AdvancedExpander.IsExpanded = true;
         SetOperation("正在运行连接诊断…");
 
@@ -748,6 +1047,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             if (_shutdownInProgress) return;
+            _logSink.Error("doctor-ui", ex);
             MessageBox.Show(ex.Message, "诊断失败", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
@@ -758,7 +1058,7 @@ public partial class MainWindow : Window
 
     private void OpenLogsButton_Click(object sender, RoutedEventArgs e) => OpenPath(AppPaths.LogsDirectory);
     private void OpenConfigButton_Click(object sender, RoutedEventArgs e) => OpenConfig();
-    private void OpenConnectorButton_Click(object sender, RoutedEventArgs e) => OpenUrl(ChatGptConnectorsUrl);
+    private void OpenConnectorButton_Click(object sender, RoutedEventArgs e) => OpenUrl(ChatGptPluginsUrl);
 
     private void OnLogLine(string line)
     {
@@ -783,14 +1083,16 @@ public partial class MainWindow : Window
     private void OnStateChanged(RuntimeState _) => RenderMainState();
     private void OnHealthChanged() => RenderMainState();
 
-    private static void OpenUrl(string url)
+    private void OpenUrl(string url)
     {
         try
         {
+            _logSink.Write("browser", $"打开页面：{url}");
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         }
         catch (Exception ex)
         {
+            _logSink.Error("browser", ex);
             MessageBox.Show(ex.Message, "无法打开链接", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
@@ -804,6 +1106,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            App.Log.Error("open-directory", ex);
             MessageBox.Show(ex.Message, "无法打开目录", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
@@ -819,6 +1122,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            App.Log.Error("open-config", ex);
             MessageBox.Show(ex.Message, "无法打开 config.json", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }

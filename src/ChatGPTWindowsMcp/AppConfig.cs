@@ -6,12 +6,13 @@ internal sealed class AppConfig
 {
     public string TunnelId { get; set; } = "";
     public string RuntimeApiKey { get; set; } = "";
+    public string PluginDisplayName { get; set; } = "Windows 电脑助手";
+    public string PluginConnectionAppId { get; set; } = "";
     public int McpPort { get; set; } = 8000;
     public string ProfileName { get; set; } = "windows-mcp";
     public string WindowsMcpSpec { get; set; } = "windows-mcp";
     public string PythonVersion { get; set; } = "3.13";
     public bool ReuseExistingMcp { get; set; } = false;
-    public bool AutoOpenChatGptConnectors { get; set; } = true;
     public bool AutoDownloadTunnelClient { get; set; } = true;
     public string TunnelClientVersion { get; set; } = "latest";
     public bool AutoDetectSystemProxy { get; set; } = true;

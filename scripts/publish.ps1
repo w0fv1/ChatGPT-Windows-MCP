@@ -4,10 +4,10 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Project = Join-Path $Root "src\ChatGPTWindowsMcp\ChatGPTWindowsMcp.csproj"
 $Dist = Join-Path $Root "dist"
 
-if (Test-Path $Dist) {
-    Remove-Item $Dist -Recurse -Force
-}
-New-Item -ItemType Directory -Path $Dist | Out-Null
+& (Join-Path $PSScriptRoot "prepare-bundled-uv.ps1")
+& (Join-Path $PSScriptRoot "prepare-bundled-runtime.ps1")
+
+New-Item -ItemType Directory -Path $Dist -Force | Out-Null
 
 dotnet publish $Project `
   -c Release `
@@ -18,6 +18,7 @@ dotnet publish $Project `
   /p:IncludeNativeLibrariesForSelfExtract=true `
   /p:DebugType=None `
   /p:DebugSymbols=false
+if ($LASTEXITCODE -ne 0) { throw "Publish failed." }
 
 Copy-Item (Join-Path $Root "config.example.json") (Join-Path $Dist "config.example.json")
 Copy-Item (Join-Path $Root "README.md") (Join-Path $Dist "README.md")

@@ -12,6 +12,23 @@ The project follows Semantic Versioning where practical.
 - Expand automated tests for startup and failure-state handling.
 - Improve accessibility and localization.
 
+## [0.2.0]
+
+### Added
+
+- Bundle uv/uvx, Python, Windows-MCP and all pinned dependencies, Tunnel client and cloudflared in the portable executable.
+- Verify and extract the bundled runtime locally with file-level progress and integrity repair.
+- Provide manual MCP app creation and copyable Plugin Creator prompts in the setup wizard.
+- Check configuration, local MCP tool discovery and Tunnel readiness before completing setup.
+
+### Changed
+
+- Start local services automatically after Tunnel, API key and proxy setup; open websites only when requested.
+- Show the current operation with a percentage on the same line, without a spinner or progress bar.
+- Add copy buttons for setup links and ChatGPT, and preserve optional registered MCP app IDs.
+- Flush detailed process and startup logs immediately while redacting credentials.
+- Retain uv installation fallbacks for development builds without bundled assets; no WinGet or system Python is needed by the default portable build.
+
 ## [0.1.2]
 
 ### Fixed

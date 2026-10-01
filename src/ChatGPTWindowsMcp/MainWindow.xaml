@@ -25,15 +25,14 @@
                                LineHeight="25"
                                Foreground="{StaticResource TextSecondaryBrush}"
                                TextWrapping="Wrap"
-                               Text="Windows-MCP + OpenAI Secure MCP Tunnel 的便携启动器。用户完成 OpenAI Tunnel 配置后，即可在 ChatGPT 中通过连接器操作本机。"/>
+                               Text="Windows-MCP + OpenAI Secure MCP Tunnel 的便携启动器。配置并启动本机服务后，在 ChatGPT 中创建插件，即可接入这台电脑。"/>
 
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel HorizontalAlignment="Center" MaxWidth="720">
-                            <TextBlock x:Name="StatusTitleText"
-                                       HorizontalAlignment="Center"
-                                       FontSize="25"
-                                       FontWeight="SemiBold"
-                                       TextAlignment="Center"/>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                <TextBlock x:Name="StatusTitleText" FontSize="25" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="MainStartupPercentText" Margin="14,0,0,0" FontSize="25" VerticalAlignment="Center" Visibility="Collapsed"/>
+                            </StackPanel>
                             <TextBlock x:Name="StatusDetailText"
                                        Margin="0,10,0,24"
                                        HorizontalAlignment="Center"
@@ -60,6 +59,8 @@
                                         Visibility="Collapsed"
                                         Content="重新配置"
                                         Click="ReconfigureButton_Click"/>
+                                <Button x:Name="PluginSetupButton" Style="{StaticResource SecondaryButton}" Margin="10,0,0,0"
+                                        Visibility="Collapsed" Content="配置插件" Click="PluginSetupButton_Click"/>
                             </StackPanel>
                         </StackPanel>
                     </Border>
@@ -137,7 +138,6 @@
                                         <TextBlock Text="行为" Style="{StaticResource SectionTitle}" FontSize="18"/>
                                         <CheckBox x:Name="AutoDetectProxyCheckBox" Margin="0,16,0,10" Content="自动读取 Windows 系统代理供下载和 OpenAI Tunnel 使用"/>
                                         <CheckBox x:Name="ReuseMcpCheckBox" Margin="0,0,0,10" Content="本地端口已有 MCP 时复用"/>
-                                        <CheckBox x:Name="AutoOpenCheckBox" Margin="0,0,0,10" Content="连接成功后自动打开 ChatGPT 连接器设置"/>
                                         <CheckBox x:Name="AutoDownloadTunnelCheckBox" Margin="0,0,0,0" Content="缺少 tunnel-client 时自动下载官方最新版"/>
                                     </StackPanel>
                                 </Border>
@@ -147,7 +147,7 @@
                                     <Button Style="{StaticResource SecondaryButton}" Margin="0,0,12,10" Content="连接诊断" Click="DoctorButton_Click"/>
                                     <Button Style="{StaticResource SecondaryButton}" Margin="0,0,12,10" Content="打开日志目录" Click="OpenLogsButton_Click"/>
                                     <Button Style="{StaticResource SecondaryButton}" Margin="0,0,12,10" Content="打开 config.json" Click="OpenConfigButton_Click"/>
-                                    <Button Style="{StaticResource SecondaryButton}" Margin="0,0,0,10" Content="打开 ChatGPT 连接器" Click="OpenConnectorButton_Click"/>
+                                    <Button Style="{StaticResource SecondaryButton}" Margin="0,0,0,10" Content="ChatGPT 连接设置" Click="OpenConnectorButton_Click"/>
                                 </WrapPanel>
 
                                 <Border Margin="0,16,0,0" Padding="16" Background="#FFF8E8" CornerRadius="0">
@@ -174,7 +174,7 @@
             </Grid>
         </ScrollViewer>
 
-        <!-- 三步配置向导 -->
+        <!-- 四步配置向导 -->
         <Grid x:Name="WizardRoot" Visibility="Collapsed" Background="{StaticResource PageBackgroundBrush}">
             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <Grid Margin="24,22,24,24">
@@ -187,20 +187,13 @@
                     <StackPanel Grid.Column="1" MaxWidth="760" HorizontalAlignment="Stretch">
                         <TextBlock Text="创建 MCP 链接" Style="{StaticResource TitleText}"/>
 
-                        <StackPanel Margin="0,12,0,26" Orientation="Horizontal">
-                            <TextBlock x:Name="WizardStepCaption" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
-                            <Border Margin="18,0,10,0" Padding="12,6" CornerRadius="0" Background="#EAF2FF">
-                                <TextBlock x:Name="TunnelStepPill" Text="1  Tunnel ID" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold"/>
-                            </Border>
-                            <TextBlock Margin="2,5,2,0" Foreground="#A0A5AD" Text="────────"/>
-                            <Border Margin="10,0,0,0" Padding="12,6" CornerRadius="0" Background="#ECEEF1">
-                                <TextBlock x:Name="ApiStepPill" Text="2  API Key" Foreground="{StaticResource TextSecondaryBrush}" FontWeight="SemiBold"/>
-                            </Border>
-                            <TextBlock Margin="2,5,2,0" Foreground="#A0A5AD" Text="────────"/>
-                            <Border Margin="10,0,0,0" Padding="12,6" CornerRadius="0" Background="#ECEEF1">
-                                <TextBlock x:Name="ProxyStepPill" Text="3  代理（可选）" Foreground="{StaticResource TextSecondaryBrush}" FontWeight="SemiBold"/>
-                            </Border>
-                        </StackPanel>
+                        <TextBlock x:Name="WizardStepCaption" Margin="0,12,0,10" FontWeight="SemiBold" Foreground="{StaticResource TextSecondaryBrush}"/>
+                        <WrapPanel Margin="0,0,0,20">
+                            <Border Margin="0,0,10,6" Padding="12,6" Background="#EAF2FF"><TextBlock x:Name="TunnelStepPill" Text="1  Tunnel ID" FontWeight="SemiBold"/></Border>
+                            <Border Margin="0,0,10,6" Padding="12,6" Background="#ECEEF1"><TextBlock x:Name="ApiStepPill" Text="2  API Key" FontWeight="SemiBold"/></Border>
+                            <Border Margin="0,0,10,6" Padding="12,6" Background="#ECEEF1"><TextBlock x:Name="ProxyStepPill" Text="3  网络代理" FontWeight="SemiBold"/></Border>
+                            <Border Margin="0,0,0,6" Padding="12,6" Background="#ECEEF1"><TextBlock x:Name="PluginStepPill" Text="4  ChatGPT 插件" FontWeight="SemiBold"/></Border>
+                        </WrapPanel>
 
                         <Border Style="{StaticResource CardStyle}" Padding="32">
                             <Grid>
@@ -209,7 +202,11 @@
                                         <TextBlock Text="创建 Tunnel" Style="{StaticResource SectionTitle}" FontSize="28"/>
                                         <TextBlock Margin="0,10,0,22" FontSize="15" LineHeight="24" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"
                                                    Text="先创建一个 OpenAI Tunnel，然后把生成的 Tunnel ID 粘贴到下面。"/>
-                                        <Button HorizontalAlignment="Left" Style="{StaticResource SecondaryButton}" Content="打开 Tunnel 创建页面" Click="WizardOpenTunnel_Click"/>
+                                        <WrapPanel>
+                                            <Button Margin="0,0,12,10" Style="{StaticResource SecondaryButton}" Content="打开 Tunnel 创建页面" Click="WizardOpenTunnel_Click"/>
+                                            <Button Margin="0,0,0,10" Style="{StaticResource SecondaryButton}" Content="复制链接" Click="WizardCopyTunnel_Click"/>
+                                        </WrapPanel>
+                                        <TextBlock x:Name="TunnelLinkFeedbackText" Style="{StaticResource HelpText}"/>
 
                                         <TextBlock Margin="0,28,0,8" Text="Tunnel ID" Style="{StaticResource FieldLabel}"/>
                                         <TextBox x:Name="TunnelIdTextBox" TextChanged="TunnelIdTextBox_TextChanged"/>
@@ -232,7 +229,11 @@
                                         <TextBlock Text="创建 Runtime API Key" Style="{StaticResource SectionTitle}" FontSize="28"/>
                                         <TextBlock Margin="0,10,0,22" FontSize="15" LineHeight="24" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"
                                                    Text="创建一个 Runtime API Key，用于让这台电脑连接到刚才配置的 OpenAI Tunnel。"/>
-                                        <Button HorizontalAlignment="Left" Style="{StaticResource SecondaryButton}" Content="打开 API Key 创建页面" Click="WizardOpenApiKey_Click"/>
+                                        <WrapPanel>
+                                            <Button Margin="0,0,12,10" Style="{StaticResource SecondaryButton}" Content="打开 API Key 创建页面" Click="WizardOpenApiKey_Click"/>
+                                            <Button Margin="0,0,0,10" Style="{StaticResource SecondaryButton}" Content="复制链接" Click="WizardCopyApiKey_Click"/>
+                                        </WrapPanel>
+                                        <TextBlock x:Name="ApiKeyLinkFeedbackText" Style="{StaticResource HelpText}"/>
 
                                         <TextBlock Margin="0,28,0,8" Text="Runtime API Key" Style="{StaticResource FieldLabel}"/>
                                         <Grid>
@@ -262,28 +263,65 @@
 
                                 <Grid x:Name="ProxyStepPanel" Visibility="Collapsed">
                                     <StackPanel>
-                                        <TextBlock Text="配置网络代理（可选）" Style="{StaticResource SectionTitle}" FontSize="28"/>
-                                        <TextBlock Margin="0,10,0,22" FontSize="15" LineHeight="24" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"
-                                                   Text="如果 GitHub、uv 或 OpenAI Tunnel 无法直连，可填写 HTTP(S) 代理。该代理会用于下载 tunnel-client、安装/运行 uv 以及连接 Tunnel。留空时自动检测环境变量和 Windows 系统代理。"/>
-
-                                        <TextBlock Margin="0,8,0,8" Text="代理地址" Style="{StaticResource FieldLabel}"/>
+                                        <TextBlock Text="设置网络代理（可选）" Style="{StaticResource SectionTitle}" FontSize="28"/>
+                                        <TextBlock Margin="0,10,0,22" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Text="先设置下载和连接使用的代理，下一页再配置 ChatGPT 插件。无需代理时留空即可。"/>
+                                        <TextBlock Text="代理地址" Style="{StaticResource FieldLabel}"/>
                                         <TextBox x:Name="WizardProxyTextBox" TextChanged="WizardProxyTextBox_TextChanged"/>
                                         <TextBlock x:Name="WizardProxyValidationText" Style="{StaticResource HelpText}"/>
                                         <CheckBox x:Name="WizardAutoDetectProxyCheckBox" Margin="0,18,0,0" Content="留空时自动读取 Windows 系统代理"/>
-
-                                        <Grid Margin="0,28,0,0">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="Auto"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
-                                            <Button Grid.Column="0" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0" Content="取消" Click="WizardCancel_Click"/>
-                                            <Button Grid.Column="1" Style="{StaticResource SecondaryButton}" Content="上一步" Click="ProxyBackButton_Click"/>
-                                            <Button x:Name="ProxyFinishButton" Grid.Column="3" Style="{StaticResource PrimaryButton}" Content="完成" Click="ProxyFinishButton_Click"/>
-                                        </Grid>
+                                        <WrapPanel Margin="0,28,0,0">
+                                            <Button Margin="0,0,12,10" Style="{StaticResource SecondaryButton}" Content="取消" Click="WizardCancel_Click"/>
+                                            <Button Margin="0,0,12,10" Style="{StaticResource SecondaryButton}" Content="上一步" Click="ProxyBackButton_Click"/>
+                                            <Button x:Name="ProxyNextButton" Margin="0,0,0,10" Style="{StaticResource PrimaryButton}" Content="下一步：配置插件" Click="ProxyNextButton_Click"/>
+                                        </WrapPanel>
                                     </StackPanel>
                                 </Grid>
+
+                                <Grid x:Name="PluginStepPanel" Visibility="Collapsed">
+                                    <StackPanel>
+                                        <TextBlock Text="创建 ChatGPT 插件" Style="{StaticResource SectionTitle}" FontSize="28"/>
+                                        <Grid Margin="0,10,0,14">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock x:Name="PluginServiceStatusText" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"/>
+                                            <TextBlock x:Name="PluginStartupPercentText" Grid.Column="1" Margin="14,0,0,0" Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Center" Visibility="Collapsed"/>
+                                        </Grid>
+                                        <TextBlock Text="插件名字" Style="{StaticResource FieldLabel}"/>
+                                        <TextBox x:Name="PluginNameTextBox" MaxLength="80" TextChanged="PluginSettings_TextChanged"/>
+                                        <TextBlock x:Name="PluginNameValidationText" Style="{StaticResource HelpText}"/>
+                                        <TextBlock Text="方式一：手动创建" Style="{StaticResource FieldLabel}" Margin="0,12,0,0"/>
+                                        <WrapPanel Margin="0,10,0,0">
+                                            <Button x:Name="RegisterTunnelButton" Margin="0,0,12,10" Style="{StaticResource SecondaryButton}" Content="创建 MCP 应用" Click="RegisterTunnelButton_Click"/>
+                                            <Button Margin="0,0,0,10" Style="{StaticResource SecondaryButton}" Content="复制 Tunnel ID" Click="CopyPluginTunnelIdButton_Click"/>
+                                        </WrapPanel>
+                                        <TextBlock x:Name="PluginTunnelIdText" Style="{StaticResource HelpText}"/>
+                                        <TextBlock Text="等待上方提示 Tunnel 就绪后，打开插件页：添加 → 创建 MCP 应用。连接选“隧道”，粘贴 Tunnel ID；身份验证选“无需身份验证”，确认后创建。使用期间保持启动器运行。" Style="{StaticResource HelpText}"/>
+                                        <TextBlock Text="方式二：让 AI 创建" Margin="0,18,0,8" Style="{StaticResource FieldLabel}"/>
+                                        <TextBlock Text="复制提示词发给 ChatGPT，并选择 @Plugin Creator。已有 MCP 应用时可在下方填入详情链接，方便 AI 复用。" Style="{StaticResource HelpText}"/>
+                                        <TextBlock Text="已有 MCP 应用详情链接（可选）" Margin="0,10,0,8" Style="{StaticResource FieldLabel}"/>
+                                        <TextBox x:Name="PluginConnectionLinkTextBox" TextChanged="PluginSettings_TextChanged"/>
+                                        <TextBlock x:Name="PluginConnectionValidationText" Style="{StaticResource HelpText}"/>
+                                        <WrapPanel Margin="0,14,0,0">
+                                            <Button x:Name="CopyPluginPromptButton" Margin="0,0,12,10" Style="{StaticResource PrimaryButton}" Content="复制创建提示词" Click="CopyPluginPromptButton_Click"/>
+                                            <Button Margin="0,0,12,10" Style="{StaticResource SecondaryButton}" Content="打开 ChatGPT" Click="OpenChatGptButton_Click"/>
+                                            <Button x:Name="CopyChatGptLinkButton" Margin="0,0,0,10" Style="{StaticResource SecondaryButton}" Content="复制 ChatGPT 链接" Click="CopyChatGptLinkButton_Click"/>
+                                        </WrapPanel>
+                                        <TextBlock x:Name="PluginPromptCopyFeedbackText">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock" BasedOn="{StaticResource HelpText}">
+                                                    <Style.Triggers>
+                                                        <Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <WrapPanel Margin="0,14,0,0">
+                                            <Button Margin="0,0,12,10" Style="{StaticResource SecondaryButton}" Content="取消" Click="WizardCancel_Click"/>
+                                            <Button x:Name="PluginBackButton" Margin="0,0,12,10" Style="{StaticResource SecondaryButton}" Content="上一步：代理" Click="PluginBackButton_Click"/>
+                                            <Button x:Name="PluginFinishButton" Margin="0,0,0,10" Style="{StaticResource PrimaryButton}" Content="完成配置" Click="PluginFinishButton_Click"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Grid>
+
                             </Grid>
                         </Border>
                     </StackPanel>

@@ -9,15 +9,48 @@ internal sealed class Bootstrapper
 {
     private readonly LogSink _log;
     private readonly SemaphoreSlim _installGate = new(1, 1);
+    private readonly object _bundledUvGate = new();
+    private bool _bundledUvChecked;
+    private bool _hasBundledUv;
+    public event Action<string>? ActivityChanged;
+    public event Action<int, string>? BundleProgressChanged;
+
+    public string? PrepareBundledRuntime()
+    {
+        ActivityChanged?.Invoke("正在校验并释放内置 Python、Windows-MCP 和 Tunnel 客户端…");
+        var root = BundledRuntime.Install(AppPaths.BundledRuntimeDirectory, (percent, detail) =>
+        {
+            BundleProgressChanged?.Invoke(percent, detail);
+            _log.Write("runtime", $"{percent}% {detail}");
+        });
+        if (root is not null) _log.Write("runtime", "内置 Python、Windows-MCP 及全部依赖已就绪；无需在线安装。");
+        return root;
+    }
 
     public Bootstrapper(LogSink log)
     {
         _log = log;
     }
 
-    public string? FindUv() => CommandRunner.FindOnPath("uv.exe") ?? CommandRunner.FindOnPath("uv");
+    public string? FindUv() => FindUvExecutable("uv.exe");
 
-    public string? FindUvx() => CommandRunner.FindOnPath("uvx.exe") ?? CommandRunner.FindOnPath("uvx");
+    public string? FindUvx() => FindUvExecutable("uvx.exe");
+
+    private string? FindUvExecutable(string name)
+    {
+        lock (_bundledUvGate)
+        {
+            if (!_bundledUvChecked)
+            {
+                ActivityChanged?.Invoke("正在校验并释放内置 uv…");
+                _hasBundledUv = BundledUv.TryInstall(AppPaths.BundledUvDirectory);
+                _bundledUvChecked = true;
+                if (_hasBundledUv) _log.Write("uv", "已校验并释放内置 uv；无需 WinGet、下载或系统 Python。");
+            }
+            if (_hasBundledUv) return Path.Combine(AppPaths.BundledUvDirectory, name);
+        }
+        return UvInstallation.FindExecutable(AppPaths.UvDirectory, name);
+    }
 
     public (string FileName, string[] PrefixArgs)? FindPythonToolRunner()
     {
@@ -32,18 +65,67 @@ internal sealed class Bootstrapper
         return null;
     }
 
-    public async Task InstallUvWithWingetAsync(AppConfig config, CancellationToken cancellationToken = default)
+    public async Task EnsureUvAsync(AppConfig config, CancellationToken cancellationToken = default)
     {
-        var winget = CommandRunner.FindOnPath("winget.exe") ?? CommandRunner.FindOnPath("winget");
-        if (winget is null)
-            throw new InvalidOperationException("未找到 WinGet。请先安装 App Installer，或手动安装 uv。");
+        await _installGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (FindPythonToolRunner() is not null) return;
+            var winget = CommandRunner.FindOnPath("winget.exe") ?? CommandRunner.FindOnPath("winget");
+            if (winget is not null)
+            {
+                try
+                {
+                    await InstallUvWithWingetAsync(winget, config, cancellationToken).ConfigureAwait(false);
+                    if (FindPythonToolRunner() is not null) return;
+                    _log.Write("WinGet 已完成，但未找到 uv/uvx；将使用官方压缩包安装。");
+                }
+                catch (Exception ex) when (ex is TimeoutException or InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    _log.Error("winget", ex);
+                    _log.Write($"WinGet 安装未完成：{ex.Message} 将使用官方压缩包安装。");
+                }
+            }
+            else
+            {
+                _log.Write("未找到 WinGet，正在使用 uv 官方压缩包备用安装…");
+            }
 
+            cancellationToken.ThrowIfCancellationRequested();
+            using var http = CreateHttpClient(config);
+            try
+            {
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                deadline.CancelAfter(TimeSpan.FromMinutes(5));
+                _log.Write("正在下载 uv 官方 Windows 压缩包并校验 SHA-256…");
+                await UvInstallation.InstallAsync(http, AppPaths.UvDirectory,
+                    RuntimeInformation.OSArchitecture, deadline.Token).ConfigureAwait(false);
+                _log.Write("uv 已安装到 tools\\uv；无需刷新 PATH 或重启程序，继续启动。");
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException("uv 备用安装超过 5 分钟。请检查网络代理后重试。");
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException)
+            {
+                throw new InvalidOperationException(
+                    "uv 官方压缩包安装失败。请检查 GitHub 网络连接或代理后重试；也可手动安装 uv 后再次启动。", ex);
+            }
+        }
+        finally { _installGate.Release(); }
+    }
+
+    private async Task InstallUvWithWingetAsync(string winget, AppConfig config, CancellationToken cancellationToken)
+    {
+        ActivityChanged?.Invoke("正在通过 WinGet 安装 uv…");
         _log.Write("正在通过 WinGet 安装 uv…");
         var proxy = ProxyResolver.ResolveControlPlaneProxy(config);
         var environment = ProxyResolver.BuildNetworkEnvironment(config);
         var arguments = new List<string>
         {
             "install",
+            "--source", "winget",
             "--id", "astral-sh.uv",
             "-e",
             "--accept-package-agreements",
@@ -62,12 +144,13 @@ internal sealed class Bootstrapper
             environment: environment,
             log: _log,
             source: "winget",
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken,
+            timeout: TimeSpan.FromSeconds(90)).ConfigureAwait(false);
 
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"uv 安装失败，WinGet 退出码 {result.ExitCode}。");
 
-        _log.Write("uv 安装完成。若当前进程尚未刷新 PATH，重新启动本程序即可。");
+        _log.Write("WinGet 安装完成，正在检查 uv/uvx 是否可用。");
     }
 
     public async Task<string> EnsureTunnelClientAsync(AppConfig config, CancellationToken cancellationToken = default)
@@ -85,6 +168,11 @@ internal sealed class Bootstrapper
         cancellationToken.ThrowIfCancellationRequested();
         AppPaths.EnsureDirectories();
         var requested = TunnelVersionPolicy.Normalize(config.TunnelClientVersion);
+        if (requested is "latest" or BundledRuntime.TunnelVersion)
+        {
+            var bundled = PrepareBundledRuntime();
+            if (bundled is not null) return Path.Combine(bundled, "tunnel", "tunnel-client.exe");
+        }
         var root = AppPaths.TunnelClientDirectory;
         var pointer = Path.Combine(root, "current-version.txt");
         string? tag = requested == "latest" ? null : requested;
@@ -125,6 +213,7 @@ internal sealed class Bootstrapper
             throw new PlatformNotSupportedException($"当前仅自动下载 Windows x64 tunnel-client。检测到架构：{RuntimeInformation.OSArchitecture}");
 
         using var http = CreateHttpClient(config);
+        ActivityChanged?.Invoke("正在查询 Tunnel 客户端版本…");
         var release = await ResolveTunnelClientReleaseAsync(http, tag ?? requested, cancellationToken)
             .ConfigureAwait(false);
         tag = TunnelVersionPolicy.Normalize(release.Tag);
@@ -141,11 +230,13 @@ internal sealed class Bootstrapper
             if (!Directory.Exists(destination))
             {
                 _log.Write($"正在下载 OpenAI tunnel-client {tag}…");
+                ActivityChanged?.Invoke($"正在下载 Tunnel 客户端 {tag}…");
                 await using (var input = await http.GetStreamAsync(release.Url, cancellationToken).ConfigureAwait(false))
                 await using (var output = File.Create(tempZip))
                     await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
 
                 Directory.CreateDirectory(tempDir);
+                ActivityChanged?.Invoke("正在解压并校验 Tunnel 客户端…");
                 ZipFile.ExtractToDirectory(tempZip, tempDir);
                 var executables = Directory.GetFiles(tempDir, "tunnel-client.exe", SearchOption.AllDirectories);
                 if (executables.Length != 1)
@@ -197,6 +288,7 @@ internal sealed class Bootstrapper
     {
         AppPaths.EnsureDirectories();
         var mcpUrl = $"http://127.0.0.1:{config.McpPort}/mcp";
+        Directory.CreateDirectory(AppPaths.ProfilesDirectory);
 
         _log.Write($"正在生成 Tunnel Profile：{config.ProfileName}");
         var result = await CommandRunner.RunAsync(
@@ -218,6 +310,7 @@ internal sealed class Bootstrapper
 
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"创建 tunnel profile 失败，退出码 {result.ExitCode}。");
+        _log.Write("tunnel-init", $"Profile 已生成，保存目录：{AppPaths.ProfilesDirectory}");
     }
 
     private async Task<(string Tag, string Url)> ResolveTunnelClientReleaseAsync(
