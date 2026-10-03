@@ -13,6 +13,42 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        if (OperatingSystem.IsWindows() && args.Length == 0)
+        {
+            await Test("Windows startup registration is quoted, reversible and portable-copy aware", () =>
+            {
+                if (!OperatingSystem.IsWindows()) return;
+                var keyPath = @"Software\ChatGPTWindowsMcp.Tests\" + Guid.NewGuid().ToString("N");
+                const string executable = @"C:\Apps with spaces\中文\ChatGPT-Windows-MCP.exe";
+                var startup = new WindowsStartup(executable, keyPath);
+                var otherCopy = new WindowsStartup(@"C:\Other\ChatGPT-Windows-MCP.exe", keyPath);
+                try
+                {
+                    Require(!startup.IsEnabled());
+                    startup.SetEnabled(true);
+                    startup.SetEnabled(true);
+                    Require(startup.IsEnabled());
+                    using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(keyPath))
+                        Equal($"\"{executable}\" --startup", key!.GetValue("ChatGPT-Windows-MCP") as string);
+                    otherCopy.SetEnabled(false);
+                    Require(startup.IsEnabled());
+                    otherCopy.SetEnabled(true);
+                    Require(!startup.IsEnabled() && otherCopy.IsEnabled());
+                    startup.SetEnabled(false);
+                    Require(otherCopy.IsEnabled());
+                    otherCopy.SetEnabled(false);
+                    otherCopy.SetEnabled(false);
+                    Require(!otherCopy.IsEnabled());
+                }
+                finally
+                {
+                    Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(keyPath, throwOnMissingSubKey: false);
+                }
+                ThrowsSync<ArgumentException>(() => { if (OperatingSystem.IsWindows()) _ = new WindowsStartup("relative.exe", keyPath); });
+                ThrowsSync<ArgumentException>(() => { if (OperatingSystem.IsWindows()) _ = new WindowsStartup(@"C:\dotnet.exe", keyPath); });
+                ThrowsSync<ArgumentException>(() => { if (OperatingSystem.IsWindows()) _ = new WindowsStartup("C:\\bad\"path.exe", keyPath); });
+            });
+        }
         await Test("runtime paths cannot escape extraction directory", () =>
         {
             using var temp = new TempDirectory();

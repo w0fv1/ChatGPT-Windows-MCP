@@ -8,6 +8,7 @@
   </PropertyGroup>
   <!-- No external test-framework packages; link the production implementations. -->
   <ItemGroup>
+    <Compile Include="../../src/ChatGPTWindowsMcp/WindowsStartup.cs" Link="Production/WindowsStartup.cs" />
     <Compile Include="../../src/ChatGPTWindowsMcp/RuntimeHealthState.cs" Link="Production/RuntimeHealthState.cs" />
     <Compile Include="../../src/ChatGPTWindowsMcp/TunnelHealthProbe.cs" Link="Production/TunnelHealthProbe.cs" />
     <Compile Include="../../src/ChatGPTWindowsMcp/TunnelVersionPolicy.cs" Link="Production/TunnelVersionPolicy.cs" />

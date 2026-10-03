@@ -104,6 +104,12 @@
                                            Text="这些参数用于本地 Windows-MCP 和 OpenAI Tunnel 的启动过程。默认值适用于大多数用户。"/>
 
                                 <StackPanel Margin="0,0,0,20">
+                                    <CheckBox x:Name="WindowsStartupCheckBox" Content="开机自启" Click="WindowsStartupCheckBox_Click"/>
+                                    <TextBlock x:Name="WindowsStartupHelpText" Style="{StaticResource HelpText}"
+                                               Text="登录 Windows 后自动启动并连接已保存的服务。勾选后立即生效，关闭窗口仍会停止服务。"/>
+                                </StackPanel>
+
+                                <StackPanel Margin="0,0,0,20">
                                     <TextBlock Text="MCP 本地端口" Style="{StaticResource FieldLabel}"/>
                                     <TextBox x:Name="PortTextBox"/>
                                     <TextBlock Text="默认 8000。仅在端口冲突或自定义本地 MCP 时修改。" Style="{StaticResource HelpText}"/>

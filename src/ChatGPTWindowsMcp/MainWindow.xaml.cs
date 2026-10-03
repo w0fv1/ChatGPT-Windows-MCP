@@ -29,6 +29,7 @@ public partial class MainWindow : Window
     private bool _shutdownInProgress;
     private bool _shutdownComplete;
     private readonly CancellationTokenSource _windowLifetime = new();
+    private WindowsStartup? _windowsStartup;
 
     public MainWindow()
     {
@@ -57,6 +58,75 @@ public partial class MainWindow : Window
         RenderMainState();
 
         Closing += MainWindowOnClosing;
+        InitializeWindowsStartup();
+        Loaded += MainWindowOnLoaded;
+    }
+
+    private void InitializeWindowsStartup()
+    {
+        try
+        {
+            _windowsStartup = new WindowsStartup(Environment.ProcessPath ?? "");
+            WindowsStartupCheckBox.IsChecked = _windowsStartup.IsEnabled();
+        }
+        catch (Exception ex)
+        {
+            _logSink.Error("windows-startup-read", ex);
+            WindowsStartupCheckBox.IsEnabled = false;
+            WindowsStartupHelpText.Text = $"无法读取开机自启设置：{ex.Message}";
+        }
+    }
+
+    private void WindowsStartupCheckBox_Click(object sender, RoutedEventArgs e)
+        => SetWindowsStartupEnabled(WindowsStartupCheckBox.IsChecked == true);
+
+    private void SetWindowsStartupEnabled(bool enabled)
+    {
+        if (_windowsStartup is null) return;
+        try
+        {
+            _windowsStartup.SetEnabled(enabled);
+            WindowsStartupCheckBox.IsChecked = _windowsStartup.IsEnabled();
+            _logSink.Write("windows-startup", enabled ? "已启用登录 Windows 时自动启动。" : "已关闭开机自启。");
+        }
+        catch (Exception ex)
+        {
+            _logSink.Error("windows-startup-write", ex);
+            InitializeWindowsStartup();
+            MessageBox.Show($"无法更改开机自启设置：{ex.Message}", "开机自启", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void OfferWindowsStartupAfterSetup()
+    {
+        if (_shutdownInProgress || _windowsStartup is null || !WindowsStartupCheckBox.IsEnabled) return;
+        try
+        {
+            var enabled = _windowsStartup.IsEnabled();
+            WindowsStartupCheckBox.IsChecked = enabled;
+            if (enabled) return;
+        }
+        catch (Exception ex)
+        {
+            _logSink.Error("windows-startup-read", ex);
+            InitializeWindowsStartup();
+            return;
+        }
+
+        var choice = MessageBox.Show(this,
+            "配置已完成，服务已成功连接。是否开启开机自启？\n\n开启后，登录 Windows 时将自动启动程序并连接已保存的服务。\n以后可在“高级选项 → 运行设置”中修改。",
+            "开启开机自启", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No);
+        if (choice == MessageBoxResult.Yes) SetWindowsStartupEnabled(true);
+    }
+
+    private async void MainWindowOnLoaded(object sender, RoutedEventArgs e)
+    {
+        Loaded -= MainWindowOnLoaded;
+        if (!Environment.GetCommandLineArgs().Contains(WindowsStartup.StartupArgument, StringComparer.OrdinalIgnoreCase) ||
+            _shutdownInProgress || !IsConfigured()) return;
+
+        _logSink.Write("windows-startup", "自动启动已保存的连接。");
+        await StartConfiguredRuntimeAsync();
     }
 
     private async void MainWindowOnClosing(object? sender, CancelEventArgs e)
@@ -822,6 +892,7 @@ public partial class MainWindow : Window
         _registrationInProgress = true;
         PluginFinishButton.Content = "正在检查…";
         UpdatePluginPrompt();
+        var setupCompleted = false;
         try
         {
             var errors = _config.Validate();
@@ -833,6 +904,7 @@ public partial class MainWindow : Window
             _windowLifetime.Token.ThrowIfCancellationRequested();
             _logSink.Write("wizard", "完成配置检查通过；" + summary + " ChatGPT 端应用创建状态需在 ChatGPT 中确认。");
             ShowMainPage();
+            setupCompleted = true;
         }
         catch (OperationCanceledException) when (_windowLifetime.IsCancellationRequested) { }
         catch (Exception ex)
@@ -847,6 +919,7 @@ public partial class MainWindow : Window
             PluginFinishButton.Content = "完成配置";
             SetOperation(null);
         }
+        if (setupCompleted) OfferWindowsStartupAfterSetup();
     }
 
     private bool SaveWizardProxyIfValid()

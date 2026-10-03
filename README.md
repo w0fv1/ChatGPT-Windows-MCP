@@ -34,6 +34,7 @@ ChatGPT connector can operate the local Windows machine
 ## Features
 
 - WPF/XAML Windows desktop UI.
+- Optional **开机自启** switch under **高级选项 → 运行设置**: starts the launcher and saved MCP/Tunnel connection when the current user signs in to Windows, without administrator rights.
 - Four-step setup wizard: **Tunnel ID → Runtime API Key → network proxy → ChatGPT plugin**.
 - Name the plugin and copy a generated Plugin Creator prompt with the configured Tunnel ID, without including the Runtime API Key.
 - One-click dependency preparation and startup.
@@ -73,6 +74,12 @@ The plugin page requires a registered connection detail URL or `plugin_asdk_app.
 Register Tunnel automatically starts stopped services or retries a failed startup, then checks the configured Tunnel, fresh readiness and local MCP initialization and tool discovery before opening ChatGPT. Startup also checks MCP initialization and tool discovery; Connection Diagnostics can repeat these checks while running without stopping services. Going back to edit the proxy stops services first, and proceeding to Step 4 restarts them with the saved settings. These checks never execute tools and do not establish ChatGPT workspace permissions or prove the registration succeeded.
 
 The proxy is used for tunnel-client downloads, WinGet/uv network access, Windows-MCP package resolution, and the OpenAI Tunnel connection. When left blank, environment variables and the Windows system proxy can be detected automatically. Other runtime settings, logs, and diagnostics are under **高级选项**.
+
+## Start with Windows
+
+Enable **开机自启** under **高级选项 → 运行设置** after placing the executable in its permanent folder. The switch takes effect immediately and is off by default. After **完成配置** successfully verifies the running services, the wizard asks whether to enable startup if it is currently off. Choosing No leaves it off; failed or cancelled setup does not prompt. It registers the current executable in the current user's Windows Run entry with `--startup`; API keys remain in the existing local configuration, never in the startup command. On sign-in, a configured launcher connects automatically; an unconfigured launcher shows the setup screen without starting services. Manual launches retain the normal Start button behavior. Closing the window still stops services.
+
+Disable the switch before deleting the portable app. After moving it, enable the switch from the new location. Only one portable copy is registered at a time. If Windows Task Manager disables the startup entry, re-enable it there. Startup connection failures use the existing error and retry flow.
 
 ## Architecture
 

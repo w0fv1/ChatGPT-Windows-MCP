@@ -12,6 +12,15 @@ The project follows Semantic Versioning where practical.
 - Expand automated tests for startup and failure-state handling.
 - Improve accessibility and localization.
 
+## [0.2.1] - 2026-10-03
+
+### Added
+
+- Optional start with Windows switch under Advanced Options → Runtime Settings; changes take effect immediately without administrator rights.
+- Offer to enable startup after successful setup completion, skipping failed/cancelled setup and already-enabled startup.
+- Automatically connect saved MCP and Tunnel services when launched at Windows sign-in; keep manual launch behavior unchanged.
+- Regression coverage for quoted startup paths, registration removal and portable-copy ownership.
+
 ## [0.2.0]
 
 ### Added
