@@ -33,6 +33,9 @@ jobs:
       - name: Run launcher regression tests
         run: dotnet run --project .\tests\Launcher.RegressionTests\Launcher.RegressionTests.csproj -c Release
 
+      - name: Run tray lifecycle smoke tests
+        run: dotnet run --project .\tests\Tray.SmokeTests\Tray.SmokeTests.csproj -c Release
+
       - name: Publish portable single-file
         shell: pwsh
         run: .\scripts\publish.ps1

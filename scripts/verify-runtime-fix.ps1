@@ -14,6 +14,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Release build failed: $LASTEXITCODE" }
     & dotnet run --project .\tests\Launcher.RegressionTests\Launcher.RegressionTests.csproj -c Release
     if ($LASTEXITCODE -ne 0) { throw "Regression tests failed: $LASTEXITCODE" }
+    & dotnet run --project .\tests\Tray.SmokeTests\Tray.SmokeTests.csproj -c Release
+    if ($LASTEXITCODE -ne 0) { throw "Tray smoke tests failed: $LASTEXITCODE" }
     Write-Host 'Build and regression console passed. ChatGPT/Tunnel end-to-end validation is still required.'
 } finally {
     Pop-Location

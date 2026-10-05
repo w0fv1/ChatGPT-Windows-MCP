@@ -78,8 +78,10 @@
 
 ## Shutdown lifecycle
 
-- [x] Closing the WPF window while Windows-MCP is listening exits without freezing the dispatcher.
-- [x] Graceful close releases the owned MCP port and terminates the listener process.
+- [ ] Closing the WPF window while Windows-MCP is listening hides it to the tray and preserves the connection.
+- [ ] Choosing Exit from the tray releases the owned MCP port and terminates the listener process without freezing the dispatcher.
+- [x] Automated tray smoke test covers initial visibility, setup fallback, silent preference persistence, hide/restore, minimized restore, silent startup dispatch, hidden exit and icon disposal without a real service connection.
+- [ ] Verify tray status colors and menu actions, Windows sign-in with silent startup enabled, and a background failure notification on a desktop with notifications allowed.
 - [x] Force-terminating the launcher releases the owned MCP port through Windows Job Object cleanup.
 - [x] Shutdown has a bounded UI wait and falls back to kernel/process-tree cleanup.
 

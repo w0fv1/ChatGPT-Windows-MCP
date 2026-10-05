@@ -106,7 +106,13 @@
                                 <StackPanel Margin="0,0,0,20">
                                     <CheckBox x:Name="WindowsStartupCheckBox" Content="开机自启" Click="WindowsStartupCheckBox_Click"/>
                                     <TextBlock x:Name="WindowsStartupHelpText" Style="{StaticResource HelpText}"
-                                               Text="登录 Windows 后自动启动并连接已保存的服务。勾选后立即生效，关闭窗口仍会停止服务。"/>
+                                               Text="登录 Windows 后自动启动并连接已保存的服务。勾选后立即生效，关闭窗口后服务继续在托盘运行。"/>
+                                </StackPanel>
+
+                                <StackPanel Margin="0,0,0,20">
+                                    <CheckBox x:Name="SilentStartupCheckBox" Content="静默启动" Click="SilentStartupCheckBox_Click"/>
+                                    <TextBlock Style="{StaticResource HelpText}"
+                                               Text="启动时不显示主窗口，直接进入托盘并连接已保存的服务。下次启动生效；未完成配置时仍显示窗口。可从托盘菜单退出程序。"/>
                                 </StackPanel>
 
                                 <StackPanel Margin="0,0,0,20">

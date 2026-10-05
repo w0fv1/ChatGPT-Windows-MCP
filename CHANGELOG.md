@@ -12,6 +12,19 @@ The project follows Semantic Versioning where practical.
 - Expand automated tests for startup and failure-state handling.
 - Improve accessibility and localization.
 
+## [0.3.0] - 2026-10-05
+
+### Added
+
+- System tray monitor icon with service status, restore, start/stop, logs and exit actions.
+- Optional silent startup directly below start with Windows; saves immediately and applies on the next launch.
+- Start saved connections in the background without flashing a window, with setup fallback and failure notifications.
+- Windows smoke tests for tray lifecycle, configuration persistence, silent startup dispatch and hidden exit; included in CI and release verification.
+
+### Changed
+
+- Closing the main window now keeps services running in the tray. Choose Exit from the tray menu to stop services and quit.
+
 ## [0.2.1] - 2026-10-03
 
 ### Added

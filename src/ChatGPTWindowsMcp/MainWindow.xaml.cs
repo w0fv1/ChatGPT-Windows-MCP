@@ -30,6 +30,9 @@ public partial class MainWindow : Window
     private bool _shutdownComplete;
     private readonly CancellationTokenSource _windowLifetime = new();
     private WindowsStartup? _windowsStartup;
+    private TrayIcon? _tray;
+    private bool _exitRequested;
+    private bool _trayHintShown;
 
     public MainWindow()
     {
@@ -59,7 +62,55 @@ public partial class MainWindow : Window
 
         Closing += MainWindowOnClosing;
         InitializeWindowsStartup();
-        Loaded += MainWindowOnLoaded;
+        SilentStartupCheckBox.IsChecked = _config.SilentStartup;
+        try
+        {
+            _tray = new TrayIcon(ShowFromTray, ToggleFromTray,
+                () => OpenPath(AppPaths.LogsDirectory), RequestExit);
+        }
+        catch (Exception ex)
+        {
+            _logSink.Error("tray-create", ex);
+        }
+        RenderMainState();
+    }
+
+    internal async void StartApplication(string[] args)
+    {
+        var silent = _config.SilentStartup && IsConfigured() && _tray is not null;
+        if (!silent) Show();
+        if ((silent || args.Contains(WindowsStartup.StartupArgument, StringComparer.OrdinalIgnoreCase)) && IsConfigured())
+            await StartConfiguredRuntimeAsync();
+    }
+
+    private void ShowFromTray()
+    {
+        if (_shutdownInProgress || _shutdownComplete) return;
+        Show();
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    private void ToggleFromTray()
+    {
+        if (_operationMessage is not null || _shutdownInProgress) return;
+        ShowFromTray();
+        PrimaryButton_Click(this, new RoutedEventArgs());
+    }
+
+    private void RequestExit()
+    {
+        _exitRequested = true;
+        Close();
+    }
+
+    private void SilentStartupCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        var previous = _config.SilentStartup;
+        _config.SilentStartup = SilentStartupCheckBox.IsChecked == true;
+        if (SaveConfig()) return;
+        _config.SilentStartup = previous;
+        SilentStartupCheckBox.IsChecked = previous;
     }
 
     private void InitializeWindowsStartup()
@@ -119,28 +170,28 @@ public partial class MainWindow : Window
         if (choice == MessageBoxResult.Yes) SetWindowsStartupEnabled(true);
     }
 
-    private async void MainWindowOnLoaded(object sender, RoutedEventArgs e)
-    {
-        Loaded -= MainWindowOnLoaded;
-        if (!Environment.GetCommandLineArgs().Contains(WindowsStartup.StartupArgument, StringComparer.OrdinalIgnoreCase) ||
-            _shutdownInProgress || !IsConfigured()) return;
-
-        _logSink.Write("windows-startup", "自动启动已保存的连接。");
-        await StartConfiguredRuntimeAsync();
-    }
-
     private async void MainWindowOnClosing(object? sender, CancelEventArgs e)
     {
         if (_shutdownComplete)
             return;
 
         e.Cancel = true;
+        if (!_exitRequested && _tray is not null)
+        {
+            Hide();
+            if (!_trayHintShown)
+            {
+                _trayHintShown = true;
+                _tray.Notify("已收起到托盘", "服务会继续运行。点击托盘图标可打开窗口，右键选择“退出”可停止服务并退出程序。");
+            }
+            return;
+        }
         if (_shutdownInProgress)
             return;
 
         _shutdownInProgress = true;
         _windowLifetime.Cancel();
-        _logSink.Write("shutdown", "用户关闭窗口，取消正在执行的任务并停止本机服务。");
+        _logSink.Write("shutdown", "用户退出程序，取消正在执行的任务并停止本机服务。");
         IsEnabled = false;
         _operationMessage = "正在退出并清理本地资源…";
         RenderMainState();
@@ -164,7 +215,12 @@ public partial class MainWindow : Window
         {
             _shutdownComplete = true;
             _shutdownInProgress = false;
-            _ = Dispatcher.BeginInvoke(Close);
+            _tray?.Dispose();
+            _tray = null;
+            _logSink.LineReceived -= OnLogLine;
+            _runtime.StateChanged -= OnStateChanged;
+            _runtime.HealthChanged -= OnHealthChanged;
+            _ = Dispatcher.BeginInvoke(() => Application.Current.Shutdown());
         }
     }
     private Brush ResourceBrush(string key, Brush fallback) =>
@@ -187,6 +243,18 @@ public partial class MainWindow : Window
         }
 
         UpdatePluginPrompt();
+
+        var trayHealth = _runtime.Health;
+        _tray?.Update(_operationMessage ?? (trayHealth.State == RuntimeState.Running
+                ? RuntimeHealthState.RunningTitle(trayHealth)
+                : trayHealth.State == RuntimeState.Faulted ? "连接失败" :
+                  trayHealth.State == RuntimeState.Starting ? "正在连接…" :
+                  trayHealth.State == RuntimeState.Stopping ? "正在停止…" :
+                  IsConfigured() ? "服务已停止" : "尚未配置"),
+            trayHealth.State == RuntimeState.Running,
+            _operationMessage is not null || _shutdownInProgress || trayHealth.State is RuntimeState.Starting or RuntimeState.Stopping,
+            trayHealth.McpReady && trayHealth.TunnelReady == true,
+            trayHealth.State == RuntimeState.Faulted);
 
         if (_operationMessage is not null)
         {
@@ -351,7 +419,10 @@ public partial class MainWindow : Window
             if (_shutdownInProgress) return false;
             _logSink.Error("startup-ui", ex);
             AdvancedExpander.IsExpanded = true;
-            MessageBox.Show(ex.Message, "连接失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            if (!IsVisible && _tray is not null)
+                _tray.Notify("连接失败", "无法启动已保存的服务。点击此通知或托盘图标查看运行日志并重试。", error: true);
+            else
+                MessageBox.Show(ex.Message, "连接失败", MessageBoxButton.OK, MessageBoxImage.Error);
             return false;
         }
         finally

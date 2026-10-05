@@ -17,6 +17,9 @@ public partial class App : Application
         };
         TaskScheduler.UnobservedTaskException += (_, args) => Log.Error("task-unobserved", args.Exception);
         base.OnStartup(e);
+        var window = new MainWindow();
+        MainWindow = window;
+        window.StartApplication(e.Args);
     }
 
     protected override void OnExit(ExitEventArgs e)
