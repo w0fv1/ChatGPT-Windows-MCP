@@ -1,7 +1,7 @@
 <Application x:Class="ChatGPTWindowsMcp.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             StartupUri="MainWindow.xaml">
+             ShutdownMode="OnExplicitShutdown">
     <Application.Resources>
         <SolidColorBrush x:Key="PageBackgroundBrush" Color="#F6F7F9"/>
         <SolidColorBrush x:Key="CardBackgroundBrush" Color="#FFFFFF"/>

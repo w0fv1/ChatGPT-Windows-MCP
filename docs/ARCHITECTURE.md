@@ -58,4 +58,4 @@ Processes started by the launcher are assigned to a Windows Job Object configure
 1. **Graceful shutdown** — the UI requests an orderly stop, kills owned process trees, and verifies the owned MCP listener is gone.
 2. **Kernel fallback** — if the launcher is force-terminated, closing the Job Object handle causes Windows to terminate assigned `uvx` / `windows-mcp` and `tunnel-client` process trees.
 
-WPF window shutdown has a hard three-second graceful deadline. Potentially blocking process-tree operations execute off the dispatcher thread so closing the app cannot freeze the UI indefinitely.
+Closing the main WPF window hides it to the system tray without stopping services. Explicit Exit from the tray has a hard three-second graceful deadline. Potentially blocking process-tree operations execute off the dispatcher thread so exiting the app cannot freeze the UI indefinitely. The application uses explicit shutdown and disposes the tray after service cleanup. Silent startup creates the window without showing it and starts the saved connection directly; incomplete setup or unavailable tray support keeps the window visible.

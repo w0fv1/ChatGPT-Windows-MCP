@@ -8,6 +8,7 @@
   "WindowsMcpSpec": "windows-mcp",
   "PythonVersion": "3.13",
   "ReuseExistingMcp": false,
+  "SilentStartup": false,
   "AutoDownloadTunnelClient": true,
   "TunnelClientVersion": "latest",
   "AutoDetectSystemProxy": true,

@@ -13,6 +13,7 @@ internal sealed class AppConfig
     public string WindowsMcpSpec { get; set; } = "windows-mcp";
     public string PythonVersion { get; set; } = "3.13";
     public bool ReuseExistingMcp { get; set; } = false;
+    public bool SilentStartup { get; set; } = false;
     public bool AutoDownloadTunnelClient { get; set; } = true;
     public string TunnelClientVersion { get; set; } = "latest";
     public bool AutoDetectSystemProxy { get; set; } = true;
