@@ -139,6 +139,7 @@ A generated local `config.json` can contain:
   "WindowsMcpSpec": "windows-mcp",
   "PythonVersion": "3.13",
   "ReuseExistingMcp": false,
+  "SilentStartup": false,
   "AutoDownloadTunnelClient": true,
   "TunnelClientVersion": "latest",
   "AutoDetectSystemProxy": true,
